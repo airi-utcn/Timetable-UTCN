@@ -1,4 +1,4 @@
-# AC UTCN — Room Timetable Viewer# AC UTCN — Room Timetable Viewer# AC UTCN — Timetable Viewer
+# UTCN — Room Timetable Viewer# UTCN — Room Timetable Viewer# UTCN — Timetable Viewer
 
 
 
