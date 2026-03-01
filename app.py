@@ -536,14 +536,14 @@ def index():
     """Serve the React SPA frontend directly on root."""
     frontend_dist = pathlib.Path(__file__).parent / 'frontend' / 'dist' / 'index.html'
     if frontend_dist.exists():
-                # Read the built index.html and inject a small resilient fallback UI
-                # that links to the server-rendered Live board when the SPA bundle
-                # fails (white screen). This keeps the fallback persistent across
-                # frontend rebuilds without modifying generated assets.
-                try:
-                        content = frontend_dist.read_text(encoding='utf-8')
-                        if 'id="spa-fallback"' not in content:
-                                fallback = '''
+        # Read the built index.html and inject a small resilient fallback UI
+        # that links to the server-rendered Live board when the SPA bundle
+        # fails (white screen). This keeps the fallback persistent across
+        # frontend rebuilds without modifying generated assets.
+        try:
+            content = frontend_dist.read_text(encoding='utf-8')
+            if 'id="spa-fallback"' not in content:
+                fallback = '''
     <!-- SPA runtime fallback: visible when JS errors or white screen -->
     <div id="spa-fallback" style="position:fixed;right:1rem;bottom:1rem;z-index:9999;display:none;">
         <a href="/departures" style="display:inline-block;padding:0.5rem 0.75rem;background:#003366;color:white;border-radius:6px;text-decoration:none;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Open Live (server)</a>
@@ -558,10 +558,10 @@ def index():
         })()
     </script>
 '''
-                                content = content.replace('</body>', fallback + '\n</body>')
-                        return Response(content, mimetype='text/html')
-                except Exception:
-                        return send_file(frontend_dist)
+                content = content.replace('</body>', fallback + '\n</body>')
+            return Response(content, mimetype='text/html')
+        except Exception:
+            return send_file(frontend_dist)
     return """
     <html>
     <head><title>Frontend Not Built</title></head>
@@ -2458,18 +2458,23 @@ def events_json():
     ) or {}
 
     events = []
-    from_iso = from_date.isoformat()
-    to_iso = to_date.isoformat()
+    # Only filter by date when explicit from/to query params were provided.
+    # Without params the frontend may be on a different date than the schedule
+    # data (e.g. schedule contains future-semester dates). Returning everything
+    # lets the frontend pick the right slice.
+    has_date_filter = bool(from_s or to_s)
+    from_iso = from_date.isoformat() if has_date_filter else None
+    to_iso = to_date.isoformat() if has_date_filter else None
     for room, days in schedule.items():
         for day, evs in days.items():
             # Fast skip: if the day key is a date string, compare directly
-            if day < from_iso or day > to_iso:
+            if has_date_filter and (day < from_iso or day > to_iso):
                 continue
             for e in evs:
                 start = e.get('start')
                 end = e.get('end')
                 # Filter individual events by from/to range
-                if start:
+                if has_date_filter and start:
                     ev_date = start[:10]  # 'YYYY-MM-DD'
                     if ev_date < from_iso or ev_date > to_iso:
                         continue
