@@ -2458,11 +2458,21 @@ def events_json():
     ) or {}
 
     events = []
+    from_iso = from_date.isoformat()
+    to_iso = to_date.isoformat()
     for room, days in schedule.items():
         for day, evs in days.items():
+            # Fast skip: if the day key is a date string, compare directly
+            if day < from_iso or day > to_iso:
+                continue
             for e in evs:
                 start = e.get('start')
                 end = e.get('end')
+                # Filter individual events by from/to range
+                if start:
+                    ev_date = start[:10]  # 'YYYY-MM-DD'
+                    if ev_date < from_iso or ev_date > to_iso:
+                        continue
                 title = e.get('title') or ''
                 location = e.get('location') or ''
                 

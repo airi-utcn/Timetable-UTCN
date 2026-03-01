@@ -233,7 +233,8 @@ export default function Departures() {
 
   useEffect(() => {
     fetchDepartures()
-    const interval = setInterval(fetchDepartures, 3600000)
+    // Refresh data every 5 minutes to keep the live board up-to-date
+    const interval = setInterval(fetchDepartures, 300000)
     return () => clearInterval(interval)
   }, [fetchDepartures])
 

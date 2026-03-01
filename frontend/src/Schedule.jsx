@@ -128,20 +128,26 @@ export default function Schedule() {
           weekEnd.setDate(weekEnd.getDate() + 6)
           fromDate = weekStart.toISOString().split('T')[0]
           toDate = weekEnd.toISOString().split('T')[0]
-        } else {
-          // Day/Week mode: start from today
-          const days = viewMode === 'week' ? 7 : 1
+        } else if (viewMode === 'day') {
+          // Day mode: show only today
           fromDate = todayStr
-          toDate = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+          toDate = todayStr
+        } else {
+          // Week mode: show current Mon-Sun week (adjusted by weekOffset if any)
+          const weekStart = getWeekStart(today, weekOffset)
+          const weekEnd = new Date(weekStart)
+          weekEnd.setDate(weekEnd.getDate() + 6)
+          fromDate = weekStart.toISOString().split('T')[0]
+          toDate = weekEnd.toISOString().split('T')[0]
         }
       }
       
       // Determine fetchFrom: for automatic refreshes don't fetch past events unless forced
       const force = opts && opts.force
       let fetchFrom = fromDate
-      // If not forced and not a week-wide or two-month pull, prevent fetching past
-      if (!force && scope !== 'twoMonthsAll' && scope !== 'currentWeek') {
-        // Never fetch earlier than today for automatic (non-two-month) calls
+      // In calendar mode, allow navigating to past weeks freely.
+      // For day/week modes, never fetch earlier than today unless forced.
+      if (!force && scope !== 'twoMonthsAll' && scope !== 'currentWeek' && viewMode !== 'calendar') {
         if (new Date(fetchFrom) < new Date(todayStr)) {
           fetchFrom = todayStr
         }
