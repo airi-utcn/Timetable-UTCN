@@ -129,6 +129,71 @@ Useful diagnostic endpoints
 - `playwright_captures/` — directory containing event captures and produced schedule files.
 - `config/room_aliases.json` and `config/building_aliases.json` — mapping files used for normalization and display.
 
+## API reference (detailed)
+
+Below are the most important HTTP endpoints, their parameters, behavior and notes based on the current `app.py` implementation.
+
+- GET /events.json
+   - Purpose: Return a flattened list of calendar events for the UI (FullCalendar) or API clients.
+   - Query params (optional):
+      - `from` — ISO date (YYYY-MM-DD). When present, the backend will filter events to this date or later.
+      - `to` — ISO date (YYYY-MM-DD). When present, the backend will filter events up to this date.
+      - `subject` — substring filter applied to title/subject/display_title.
+      - `professor` — substring filter for professor name.
+      - `room` — substring filter for room/building tokens.
+   - Important behavior:
+      - The server will call `ensure_schedule()` which attempts to (re)build `playwright_captures/schedule_by_room.json` if needed. `ensure_schedule()` builds a ±60-day window by default.
+      - Date filtering is only applied when `from` or `to` query parameters are explicitly provided. If neither is present the endpoint returns all schedule events (letting the frontend pick a slice). This prevents accidental empty responses when the scheduled semester is outside today's window.
+      - The returned events include fields: `title`, `display_title`, `start` (ISO), `end`, `room`, `building`, `subject`, `professor`, `location`, `color`, `source`, `calendar_name`, `year`, `group`, `group_display`. Manual and extracurricular events are appended where present.
+      - Example: `/events.json?from=2026-02-01&to=2026-04-30&room=BT5` returns events in that window matching room token `BT5`.
+
+- GET /debug/pipeline
+   - Purpose: Diagnostic endpoint that lists what the extraction pipeline currently sees on disk: counts of `events_*.json` files, `events.json` merged file count, `schedule_by_room.json` rooms & total events, `schedule_date_range`, import progress, and an `ensure_schedule` check result.
+   - No auth required (read-only). Useful to quickly check whether extracted files are present and whether the merged schedule contains events.
+
+- GET /admin/api/status
+   - Purpose: Admin-only JSON endpoint (requires admin auth) returning a comprehensive status for the admin UI: configured calendars, manual events, event counts (from multiple sources), extractor running state and short logs, planned extraction order, and periodic fetcher state.
+   - Useful fields: `events_count`, `events_count_by_schedule`, `events_count_global_json`, `last_import`, `extractor_running`, `extractor_progress`, and `planned_order`.
+
+- POST /admin/set_calendar_url
+   - Purpose: Add (or enable) a calendar URL in the DB and immediately start importing it in background.
+   - Form fields: `calendar_url` (required), `calendar_name`, `calendar_color`.
+   - Returns JSON when request `Accept` header includes `application/json` or when called as JSON. Otherwise redirects to admin UI.
+
+- POST /admin/import_calendar
+   - Purpose: Trigger an import for either a single calendar or all configured calendars.
+   - Accepts form fields or JSON body: `calendar_url` / `url`, `calendar_name` / `name`, `calendar_color` / `color`, or `calendar_id` (to import an existing DB entry).
+   - If a specific URL is provided, the server runs per-URL extraction in a background thread. If no URL provided, it launches the robust full extraction (`tools/run_full_extraction.py`) as a detached subprocess and returns 202 (scheduled).
+
+- POST /admin/upload_rooms_publisher
+   - Purpose: Upload a canonical CSV (`Rooms_PUBLISHER_HTML-ICS(in).csv`) that defines the authoritative list of calendars to extract.
+   - Behavior: Writes the CSV into `config/`, `playwright_captures/` and repo root (backing up any existing file), clears DB calendar/manual/extracurricular tables, removes per-calendar extracted files, writes minimal placeholder `events.json`/`schedule_by_room.json` so UI does not return 500 during the import, and schedules a full detached import using `tools/run_full_extraction.py`.
+
+- POST /generate_events and GET /generate_status
+   - `/generate_events` starts the extractor in a background thread and returns 202 if started. Useful for manual runs when you don't want the detached full-import runner.
+   - `/generate_status` returns current extractor `extractor_state` including tails of stdout/stderr files.
+
+- GET /calendars.json
+   - Purpose: Return a map of calendar hash -> metadata (name, color, url, building, room). Useful for the frontend to color events and show calendar names.
+
+- GET /departures
+   - Purpose: Server-rendered live board view showing today's and tomorrow's events grouped by building. Accepts `building` query param to filter.
+
+- GET /export_room
+   - Purpose: Render a printable timetable for a single room and optionally export to PDF/PNG.
+   - Query params: `room` (required), `from`, `to`, `format` (pdf|png|jpg).
+
+- Admin manual event endpoints
+   - POST /admin/add_event — fields: `title`, `start_date`, `start_time`, optional `end_time`, `location`, `building`, `room`. Stores the event in the DB and appends to `playwright_captures/events.json` for compatibility.
+   - POST /admin/delete_event — form param `index` (index in `playwright_captures/events.json`) to remove an event from the file.
+   - POST /admin/delete_manual — form param `id` to delete a manual event from DB.
+
+Notes and best practices
+
+- When troubleshooting missing events, first call `/debug/pipeline`. If `schedule_total_events` is non-zero but `/events.json` without params returns `[]`, check with an explicit date range using `/events.json?from=YYYY-MM-DD&to=YYYY-MM-DD` inside the `schedule_date_range` — this often reveals a date-filtering mismatch. The backend only applies the range when `from`/`to` params are present.
+- Use `/admin/api/status` to get counts across sources and to inspect extractor progress and logs. If you upload a new `Rooms_PUBLISHER` CSV (admin upload), a detached full import is scheduled; use `generate_status` or the admin UI to watch progress.
+
+
 ## Runbook: How to recover from an empty UI (step-by-step)
 
 1. Visit `/health` — ensure service is up.

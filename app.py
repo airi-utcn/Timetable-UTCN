@@ -54,6 +54,18 @@ _file_cache_lock = threading.Lock()
 _file_cache = {}  # path -> {'data': ..., 'mtime': ..., 'ts': ...}
 _FILE_CACHE_TTL = 10  # seconds - re-stat the file at most every 10s
 
+# ── Performance: In-memory cache for the SPA index.html ──
+# Avoids opening frontend/dist/index.html on every single HTTP request to "/".
+# The file is read once and cached until its mtime changes (checked at most
+# every _INDEX_CACHE_TTL seconds).
+_index_html_cache_lock = threading.Lock()
+_index_html_cache = {
+    'content': None,   # str: the (possibly patched) HTML content
+    'mtime': 0,        # last mtime of the source file
+    'ts': 0,           # wall-clock time of last stat check
+}
+_INDEX_CACHE_TTL = 30  # seconds between stat checks
+
 
 def _read_json_cached(file_path: str, ttl: int = _FILE_CACHE_TTL):
     """Read and cache a JSON file, re-reading only when mtime changes."""
@@ -321,9 +333,9 @@ def admin_index():
         event_files = list(out_dir.glob('events_*.json'))
         for ef in event_files:
             try:
-                with open(ef, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                    events_count += len(events)
+                data = _read_json_cached(str(ef))
+                if isinstance(data, list):
+                    events_count += len(data)
                 mtime = ef.stat().st_mtime
                 if last_import is None or mtime > last_import:
                     last_import = mtime
@@ -333,9 +345,9 @@ def admin_index():
         events_file = out_dir / 'events.json'
         if events_file.exists() and not event_files:
             try:
-                with open(events_file, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                    events_count = len(events)
+                data = _read_json_cached(str(events_file))
+                if isinstance(data, list):
+                    events_count = len(data)
                 last_import = events_file.stat().st_mtime
             except Exception:
                 pass
@@ -351,8 +363,8 @@ def admin_index():
     try:
         cfg = pathlib.Path('config') / 'calendar_config.json'
         if cfg.exists():
-            with open(cfg, 'r', encoding='utf-8') as f:
-                cfgd = json.load(f)
+            cfgd = _read_json_cached(str(cfg))
+            if cfgd and isinstance(cfgd, dict):
                 calendar_url = cfgd.get('calendar_url', '')
                 calendar_name = cfgd.get('calendar_name', '')
                 calendar_color = cfgd.get('calendar_color')
@@ -430,8 +442,7 @@ def debug_pipeline():
         total_events = 0
         for p in parts:
             try:
-                with open(p, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
+                data = _read_json_cached(str(p))
                 if data:
                     non_empty += 1
                     total_events += len(data)
@@ -446,8 +457,7 @@ def debug_pipeline():
     try:
         merged = out_dir / 'events.json'
         if merged.exists():
-            with open(merged, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = _read_json_cached(str(merged))
             diag['events_json_count'] = len(data) if isinstance(data, list) else 'not-a-list'
         else:
             diag['events_json_count'] = 'MISSING'
@@ -457,8 +467,7 @@ def debug_pipeline():
     try:
         sched = out_dir / 'schedule_by_room.json'
         if sched.exists():
-            with open(sched, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = _read_json_cached(str(sched))
             rooms = len(data)
             total_sched = sum(len(evs) for days in data.values() for evs in days.values())
             diag['schedule_rooms'] = rooms
@@ -478,16 +487,14 @@ def debug_pipeline():
     try:
         prog = out_dir / 'import_progress.json'
         if prog.exists():
-            with open(prog, 'r', encoding='utf-8') as f:
-                diag['import_progress'] = json.load(f)
+            diag['import_progress'] = _read_json_cached(str(prog))
     except Exception:
         pass
     # 6. calendar_map
     try:
         cmap = out_dir / 'calendar_map.json'
         if cmap.exists():
-            with open(cmap, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+            data = _read_json_cached(str(cmap))
             diag['calendar_map_entries'] = len(data)
         else:
             diag['calendar_map'] = 'MISSING'
@@ -533,17 +540,53 @@ def log_js_error():
 
 @app.route("/", methods=["GET"])
 def index():
-    """Serve the React SPA frontend directly on root."""
+    """Serve the React SPA frontend directly on root.
+
+    Uses an in-memory cache (_index_html_cache) so the file is only opened
+    when its mtime changes.  This eliminates per-request file-descriptor usage
+    that previously caused 'OSError: [Errno 24] Too many open files' under
+    load with multiple Gunicorn workers.
+    """
     frontend_dist = pathlib.Path(__file__).parent / 'frontend' / 'dist' / 'index.html'
-    if frontend_dist.exists():
-        # Read the built index.html and inject a small resilient fallback UI
-        # that links to the server-rendered Live board when the SPA bundle
-        # fails (white screen). This keeps the fallback persistent across
-        # frontend rebuilds without modifying generated assets.
-        try:
-            content = frontend_dist.read_text(encoding='utf-8')
-            if 'id="spa-fallback"' not in content:
-                fallback = '''
+    if not frontend_dist.exists():
+        return """
+    <html>
+    <head><title>Frontend Not Built</title></head>
+    <body style="font-family: sans-serif; padding: 2rem; text-align: center;">
+        <h1>Frontend not built</h1>
+        <p>Run <code>cd frontend && npm install && npm run build</code></p>
+    </body>
+    </html>
+    """, 200
+
+    # ── Serve from in-memory cache ──
+    now = time.time()
+    with _index_html_cache_lock:
+        cache = _index_html_cache
+        if cache['content'] and (now - cache['ts']) < _INDEX_CACHE_TTL:
+            return Response(cache['content'], mimetype='text/html')
+
+    # Check mtime (at most once per TTL window)
+    try:
+        mtime = frontend_dist.stat().st_mtime
+    except OSError:
+        # stat failed — return cached if we have it, else fallback
+        with _index_html_cache_lock:
+            if cache['content']:
+                cache['ts'] = now
+                return Response(cache['content'], mimetype='text/html')
+        return "Frontend file not accessible", 500
+
+    with _index_html_cache_lock:
+        if cache['content'] and cache['mtime'] == mtime:
+            cache['ts'] = now
+            return Response(cache['content'], mimetype='text/html')
+
+    # Re-read and patch the file
+    try:
+        content = frontend_dist.read_text(encoding='utf-8')
+        if 'id="spa-fallback"' not in content:
+            fallback = '''
     <!-- SPA runtime fallback: visible when JS errors or white screen -->
     <div id="spa-fallback" style="position:fixed;right:1rem;bottom:1rem;z-index:9999;display:none;">
         <a href="/departures" style="display:inline-block;padding:0.5rem 0.75rem;background:#003366;color:white;border-radius:6px;text-decoration:none;font-weight:600;box-shadow:0 2px 6px rgba(0,0,0,0.2);">Open Live (server)</a>
@@ -558,19 +601,19 @@ def index():
         })()
     </script>
 '''
-                content = content.replace('</body>', fallback + '\n</body>')
-            return Response(content, mimetype='text/html')
-        except Exception:
-            return send_file(frontend_dist)
-    return """
-    <html>
-    <head><title>Frontend Not Built</title></head>
-    <body style="font-family: sans-serif; padding: 2rem; text-align: center;">
-        <h1>Frontend not built</h1>
-        <p>Run <code>cd frontend && npm install && npm run build</code></p>
-    </body>
-    </html>
-    """, 200
+            content = content.replace('</body>', fallback + '\n</body>')
+        with _index_html_cache_lock:
+            _index_html_cache['content'] = content
+            _index_html_cache['mtime'] = mtime
+            _index_html_cache['ts'] = now
+        return Response(content, mimetype='text/html')
+    except Exception:
+        # Last resort: return cached version if available
+        with _index_html_cache_lock:
+            if cache['content']:
+                cache['ts'] = now
+                return Response(cache['content'], mimetype='text/html')
+        return "Error reading frontend", 500
 
 
 # Legacy /app route for backwards compatibility
@@ -895,17 +938,12 @@ def ensure_schedule(from_date: date, to_date: date):
         app.logger.error('ensure_schedule error: %s', e)
         with _schedule_rebuild_lock:
             _schedule_rebuilding = False
-        if lock_fd and got_lock:
-            try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
-                lock_fd.close()
-            except Exception:
-                pass
         raise
     finally:
-        if lock_fd and got_lock:
+        # Always close the lock file descriptor to prevent FD leaks.
+        # fcntl locks are released automatically when the fd is closed.
+        if lock_fd:
             try:
-                fcntl.flock(lock_fd, fcntl.LOCK_UN)
                 lock_fd.close()
             except Exception:
                 pass
@@ -958,10 +996,9 @@ def _display_name_for(url: str, calendar_name: str | None = None) -> str:
     try:
         map_path = pathlib.Path('playwright_captures') / 'calendar_map.json'
         if map_path.exists():
-            with open(map_path, 'r', encoding='utf-8') as f:
-                cmap = json.load(f)
+            cmap = _read_json_cached(str(map_path))
             h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
-            meta = cmap.get(h) or {}
+            meta = (cmap or {}).get(h) or {}
             if meta.get('name'):
                 return meta.get('name')
     except Exception:
@@ -2864,9 +2901,11 @@ def departures_view():
     # Get selected building from query params (default: show all)
     selected_building = request.args.get('building', '').lower()
     
-    # Load events
+    # Load events — use the in-memory file cache to avoid opening the file
+    # on every request (prevents FD exhaustion under load).
     events_file = pathlib.Path('playwright_captures/events.json')
-    if not events_file.exists():
+    all_events = _read_json_cached(str(events_file))
+    if all_events is None:
         return render_template('departures.html', 
                              events_by_day={}, 
                              buildings=BUILDINGS,
@@ -2874,8 +2913,9 @@ def departures_view():
                              current_time=datetime.now(),
                              error="No events file found. Please go to Admin to import a calendar.")
     
-    with open(events_file, 'r', encoding='utf-8') as f:
-        all_events = json.load(f)
+    # Make a shallow copy so we can safely append extracurricular events below
+    # without mutating the cached list.
+    all_events = list(all_events)
 
     # Deduplicate loaded events by ItemId or title+start to avoid duplicates showing in Live
     try:
@@ -3118,15 +3158,19 @@ def admin_api_status():
             pass
         manual_events = list_manual_events_db()
         
-        # Get events count from all events_*.json files
+        # Get events count from all events_*.json files.
+        # Use stat-only counting to avoid opening hundreds of files on every
+        # admin poll (which was a major source of FD exhaustion).
         out_dir = pathlib.Path('playwright_captures')
         event_files = list(out_dir.glob('events_*.json'))
         for ef in event_files:
             try:
-                with open(ef, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                    events_count += len(events)
-                # Track latest import time
+                # Use the cached reader — this only opens the file when its
+                # mtime has changed, and shares the parsed result across calls.
+                data = _read_json_cached(str(ef))
+                if isinstance(data, list):
+                    events_count += len(data)
+                # Track latest import time via stat (cheap, no FD held)
                 mtime = ef.stat().st_mtime
                 if last_import is None or mtime > last_import:
                     last_import = mtime
@@ -3137,9 +3181,9 @@ def admin_api_status():
         events_file = pathlib.Path('playwright_captures/events.json')
         if events_file.exists() and not event_files:
             try:
-                with open(events_file, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-                    events_count = len(events)
+                data = _read_json_cached(str(events_file))
+                if isinstance(data, list):
+                    events_count = len(data)
                 last_import = events_file.stat().st_mtime
             except Exception:
                 pass
@@ -3148,8 +3192,7 @@ def admin_api_status():
         sch_count = 0
         try:
             if schedule_file.exists():
-                with open(schedule_file, 'r', encoding='utf-8') as f:
-                    schedule = json.load(f)
+                schedule = _read_json_cached(str(schedule_file))
                 # schedule_by_room.json is a map room -> day -> [events]
                 for room, days in (schedule.items() if isinstance(schedule, dict) else []):
                     try:
@@ -3648,7 +3691,8 @@ def admin_upload_rooms_publisher():
                 pc_dir.mkdir(exist_ok=True)
                 out_path = pc_dir / 'extract_stdout.txt'
                 err_path = pc_dir / 'extract_stderr.txt'
-                # open files in append mode so multiple runs don't clobber history
+                # Open files for Popen; close them right after Popen inherits
+                # the FDs to prevent file-descriptor leaks in the web worker.
                 out_f = open(out_path, 'a', encoding='utf-8')
                 err_f = open(err_path, 'a', encoding='utf-8')
                 # Prefer an explicit Python executable from the project venv if present
@@ -3669,6 +3713,10 @@ def admin_upload_rooms_publisher():
                 # Use Popen so we don't block; start a new session so the child
                 # detaches from the web worker and continues independently.
                 proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=env, cwd=str(base), start_new_session=True, close_fds=True)
+                # Close the FDs in the parent process immediately — the child
+                # process inherited copies via close_fds=True + Popen.
+                out_f.close()
+                err_f.close()
                 # Record detached-run metadata so the admin UI can detect the
                 # background process and report that an import is in progress.
                 try:
@@ -3775,7 +3823,7 @@ def admin_import_calendar():
         pc_dir.mkdir(exist_ok=True)
         out_path = pc_dir / 'extract_stdout.txt'
         err_path = pc_dir / 'extract_stderr.txt'
-        # open files in append mode so multiple runs don't clobber history
+        # Open files for Popen; close them right after Popen inherits the FDs.
         out_f = open(out_path, 'a', encoding='utf-8')
         err_f = open(err_path, 'a', encoding='utf-8')
         # Prefer an explicit Python executable from the project venv if present
@@ -3793,6 +3841,9 @@ def admin_import_calendar():
             python_exec = sys.executable
 
         proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=os.environ.copy(), cwd=str(base), start_new_session=True, close_fds=True)
+        # Close the FDs in the parent — the child inherited copies.
+        out_f.close()
+        err_f.close()
 
         # Record detached-run metadata for UI detection
         try:
