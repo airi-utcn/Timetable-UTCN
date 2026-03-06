@@ -776,6 +776,19 @@ _schedule_last_rebuild = {
 _schedule_last_empty_check = 0.0       # wall-clock time of last rc=2 result
 _EMPTY_SCHEDULE_RETRY_SEC = 30         # seconds between retries when no events
 
+# ── Fingerprint cache ──
+# Scanning 200+ events_*.json files with glob+stat on every HTTP request is the
+# root cause of [Errno 24] Too many open files under Gunicorn (8 workers × 4
+# threads = 32 concurrent handlers, each opening 200+ FDs just for stat calls).
+# Cache the fingerprint for _FP_CACHE_TTL seconds so that at most one thread
+# per worker re-scans the directory in any given window.
+_fp_cache_lock = threading.Lock()
+_fp_cache = {
+    'result': (0.0, 0),  # (max_mtime, file_count)
+    'ts': 0.0,           # wall-clock time of last scan
+}
+_FP_CACHE_TTL = 5  # seconds — re-scan at most every 5s
+
 
 def _events_files_fingerprint() -> tuple:
     """Return (max_mtime, file_count) of events_*.json files.
@@ -784,7 +797,16 @@ def _events_files_fingerprint() -> tuple:
     extractor finishes (and writes that marker), we detect the change even
     though all individual events_*.json files may already exist from an earlier
     pass.
+
+    Results are cached for _FP_CACHE_TTL seconds to avoid opening hundreds of
+    file descriptors on every HTTP request (fixes [Errno 24]).
     """
+    now = time.time()
+    with _fp_cache_lock:
+        if (now - _fp_cache['ts']) < _FP_CACHE_TTL:
+            return _fp_cache['result']
+
+    # Scan outside the lock to avoid blocking other threads
     out_dir = pathlib.Path('playwright_captures')
     max_mt = 0.0
     count = 0
@@ -808,7 +830,12 @@ def _events_files_fingerprint() -> tuple:
                 max_mt = ic_mt
     except Exception:
         pass
-    return (max_mt, count)
+
+    result = (max_mt, count)
+    with _fp_cache_lock:
+        _fp_cache['result'] = result
+        _fp_cache['ts'] = time.time()
+    return result
 
 
 def ensure_schedule(from_date: date, to_date: date):
@@ -1035,8 +1062,11 @@ DB_PATH.parent.mkdir(exist_ok=True)
 # accidentally remain open (helps silence ResourceWarning during tests and
 # ensures cleaner shutdown). We still prefer callers to use `with
 # get_db_connection() as conn:` so connections are closed promptly.
+# NOTE: We use a bounded deque instead of an unbounded list to prevent the
+# tracker from accumulating thousands of (already-closed) connection objects
+# over the lifetime of a long-running Gunicorn worker.
 import atexit
-_OPEN_SQLITE_CONNS = []
+_OPEN_SQLITE_CONNS = deque(maxlen=64)
 _ORIG_SQLITE_CONNECT = sqlite3.connect
 
 def _tracking_sqlite_connect(*args, **kwargs):
@@ -1071,7 +1101,41 @@ def get_db_connection():
         conn.execute('PRAGMA mmap_size=268435456')  # 256 MB memory-mapped I/O
         conn.execute('PRAGMA temp_store=MEMORY')
         conn.execute('PRAGMA busy_timeout=10000')   # 10s busy timeout
-    return conn
+    return _AutoClosingConnection(conn)
+
+
+class _AutoClosingConnection:
+    """Wrapper around sqlite3.Connection that closes the connection on __exit__.
+
+    Python's sqlite3.Connection.__exit__ only commits/rollbacks but does NOT
+    close the connection, causing file descriptor leaks when used with
+    ``with get_db_connection() as conn:``.  This wrapper ensures close() is
+    always called, which is critical under Gunicorn with many workers/threads.
+    """
+    __slots__ = ('_conn',)
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    # Proxy attribute access to the underlying connection
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self._conn
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if exc_type is None:
+                self._conn.commit()
+            else:
+                self._conn.rollback()
+        finally:
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+        return False
 
 def init_db():
     """Create tables if they do not exist."""
