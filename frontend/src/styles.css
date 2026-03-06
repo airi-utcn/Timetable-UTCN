@@ -391,8 +391,8 @@ body {
   position: relative; /* for gradient hint overlay */
 }
 .events-table-inner {
-  /* Make the inner table wide enough so horizontal scroll reveals all columns on mobile */
-  min-width: 1000px;
+  /* On large screens let the grid be full-width; on mobile the card layout fits naturally */
+  min-width: 0;
 }
 .table-header {
   display: grid;
@@ -464,7 +464,7 @@ body {
   font-size: 0.75rem;
   text-transform: uppercase;
   font-weight: 600;
-  min-width: 1000px; /* ensure horizontal scroll on small viewports */
+  min-width: 0; /* cards don't need forced width on mobile */
 }
 .board-row {
   display: grid;
@@ -475,7 +475,7 @@ body {
   border-top: 1px solid var(--gray-600);
   border-left: 4px solid var(--utcn-blue);
   transition: background 0.15s;
-  min-width: 1000px; /* keep rows same width as header to avoid wrapping */
+  min-width: 0; /* cards don't need forced width on mobile */
 }
 .board-row:hover { background: rgba(255,255,255,0.05); }
 .board-row .col-time { color: #ffc107; font-family: 'SF Mono', Monaco, monospace; }
@@ -716,7 +716,12 @@ body {
 @media (max-width: 1024px) {
   .main { padding: 16px; }
   .week-label { min-width: 200px; font-size: 0.9rem; }
-  .table-header, .table-row { grid-template-columns: 90px 1fr 120px 120px; }
+  .table-header, .table-row {
+    grid-template-columns: 80px 1fr 120px 150px 100px 80px;
+  }
+  .board-header, .board-row {
+    grid-template-columns: 80px 1fr 120px 150px 100px 80px;
+  }
 }
 
 @media (max-width: 768px) {
@@ -745,11 +750,70 @@ body {
   .legend-actions { justify-content: center; }
   .schedule-grid { padding: 12px; }
   .day-section { margin-bottom: 16px; }
-  /* Keep full column set on mobile but allow horizontal scroll. Event column is flexible. */
-  .table-header, .table-row { grid-template-columns: 70px minmax(120px,1fr) 110px 160px 90px 70px; font-size: 0.85rem; padding: 10px 12px; }
   .departures-grid { padding: 12px; }
-  .board-header, .board-row { grid-template-columns: 65px minmax(120px,1fr) 110px 140px 90px 70px; font-size: 0.8rem; padding: 10px 12px; }
-  .board-row .col-status { display: none; }
+
+  /* ─── Schedule: card layout ─── */
+  .events-table { overflow-x: visible; }
+  .events-table::after { display: none; }          /* no scroll-hint gradient */
+  .events-table-inner { min-width: 0; }
+  .table-header { display: none; }                 /* hide column headers */
+  .table-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 14px;
+    border-left: 4px solid var(--utcn-blue);
+    border-top: 1px solid var(--gray-200);
+    font-size: 0.9rem;
+  }
+  .table-row > span { display: flex; align-items: baseline; gap: 8px; }
+  .table-row > span::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    width: 80px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--gray-600);
+    text-transform: uppercase;
+  }
+  .table-row .col-time { flex-direction: row; align-items: center; }
+  .table-row .col-time small { display: inline; margin-left: 4px; }
+  .table-row .col-time small::before { content: '– '; }
+  .table-row .col-title { flex-direction: column; align-items: flex-start; }
+  .table-row .col-title::before { align-self: flex-start; }
+  .table-row .col-status { display: none; }         /* hide empty status col */
+
+  /* ─── Departures: card layout ─── */
+  .departure-board { overflow-x: visible; }
+  .departure-board::after { display: none; }
+  .board-header { display: none; }
+  .board-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px 14px;
+    color: var(--gray-100);
+    border-left: 4px solid var(--utcn-blue);
+    border-top: 1px solid var(--gray-600);
+    min-width: 0;
+    font-size: 0.9rem;
+  }
+  .board-row > span { display: flex; align-items: baseline; gap: 8px; }
+  .board-row > span::before {
+    content: attr(data-label);
+    flex-shrink: 0;
+    width: 80px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--gray-300);
+    text-transform: uppercase;
+  }
+  .board-row .col-time { flex-direction: row; align-items: center; }
+  .board-row .col-time small { display: inline; margin-left: 4px; }
+  .board-row .col-time small::before { content: '– '; }
+  .board-row .col-event { flex-direction: column; align-items: flex-start; }
+  .board-row .col-event::before { align-self: flex-start; }
+
   .admin-grid { grid-template-columns: 1fr; }
   .admin-section { padding: 16px; }
   .stats-grid { grid-template-columns: 1fr; }
@@ -777,15 +841,13 @@ body {
   .schedule-grid, .departures-grid { padding: 8px; }
   .day-header { padding: 10px 12px; }
   .day-header h3 { font-size: 0.9rem; }
-  /* On very small screens hide low-priority Status column and keep Room visible.
-    Update grid to 5 columns: Time | Event | Professor | Room | Group/Year */
-  .table-header, .table-row { grid-template-columns: 80px minmax(100px,1fr) 90px 120px 80px; padding: 8px 10px; }
+  .table-row { padding: 10px 10px; font-size: 0.85rem; }
+  .table-row > span::before { width: 70px; font-size: 0.7rem; }
+  .board-row { padding: 10px 10px; font-size: 0.85rem; }
+  .board-row > span::before { width: 70px; font-size: 0.7rem; }
   .col-time { font-size: 0.8rem; }
-  .col-location, .col-professor { font-size: 0.8rem; }
   .section-header { padding: 10px 12px; }
   .section-header h3 { font-size: 0.9rem; }
-  .board-header, .board-row { grid-template-columns: 55px minmax(100px,1fr) 60px 100px 70px; padding: 8px 10px; }
-  .board-header { font-size: 0.65rem; }
   .admin-section { padding: 12px; }
   .admin-section .section-header { margin: -12px -12px 12px -12px; }
   .form-add { padding: 12px; }

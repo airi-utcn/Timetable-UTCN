@@ -365,15 +365,15 @@ export default function Departures() {
               const status = isToday ? getTimeStatus(ev) : { text: '', className: '' }
               return (
                 <div key={idx} className={'board-row ' + status.className} style={{ borderLeftColor: ev.color || '#003366' }}>
-                  <span className="col-time">{formatTime(ev.start)}<small>{formatTime(ev.end)}</small></span>
-                  <span className="col-event">
+                  <span className="col-time" data-label="Time">{formatTime(ev.start)}<small>{formatTime(ev.end)}</small></span>
+                  <span className="col-event" data-label="Event">
                     <span className="event-title">{ev.display_title || ev.title}</span>
                     <span className="event-meta">{ev.calendar_name || ev.subject || ''}</span>
                   </span>
-                  <span className="col-prof">{ev.professor || '-'}</span>
-                  <span className="col-room">{ev.room || parseRoomFromLocation(ev.location) || '-'}</span>
-                  <span className="col-group">{ev.group_display || parseGroupFromString((calendarsMap[ev.source] && (calendarsMap[ev.source].name)) || ev.calendar_name || ev.subject || ev.title) || '-'}</span>
-                  <span className={'col-status ' + status.className}>{status.text}</span>
+                  <span className="col-prof" data-label="Professor">{ev.professor || '-'}</span>
+                  <span className="col-room" data-label="Room">{ev.room || parseRoomFromLocation(ev.location) || '-'}</span>
+                  <span className="col-group" data-label="Group/Year">{ev.group_display || parseGroupFromString((calendarsMap[ev.source] && (calendarsMap[ev.source].name)) || ev.calendar_name || ev.subject || ev.title) || '-'}</span>
+                  <span className={'col-status ' + status.className} data-label="Status">{status.text}</span>
                 </div>
               )
             })}

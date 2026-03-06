@@ -604,14 +604,14 @@ export default function Schedule() {
                 </div>
                 {groupedByDate[date].sort((a, b) => (a.start || '').localeCompare(b.start || '')).map((ev, idx) => (
                   <div key={idx} className="table-row" style={{ borderLeftColor: ev.color || '#003366' }}>
-                    <span className="col-time">{formatTime(ev.start)}<small>{formatTime(ev.end)}</small></span>
-                    <span className="col-title"><strong>{ev.display_title || ev.title}</strong>
+                    <span className="col-time" data-label="Time">{formatTime(ev.start)}<small>{formatTime(ev.end)}</small></span>
+                    <span className="col-title" data-label="Event"><strong>{ev.display_title || ev.title}</strong>
                       {ev.subject && ev.subject !== ev.display_title && <small className="event-meta">{ev.subject}</small>}
                     </span>
-                    <span className="col-professor">{ev.professor || '-'}</span>
-                    <span className="col-location">{ev.room || parseRoomFromLocation(ev.location) || '-'}</span>
-                    <span className="col-group">{ev.group_display || parseGroupFromString((calendars[ev.source] && calendars[ev.source].name) || ev.calendar_name || ev.subject || ev.title) || '-'}</span>
-                    <span className="col-status">{''}</span>
+                    <span className="col-professor" data-label="Professor">{ev.professor || '-'}</span>
+                    <span className="col-location" data-label="Room">{ev.room || parseRoomFromLocation(ev.location) || '-'}</span>
+                    <span className="col-group" data-label="Group/Year">{ev.group_display || parseGroupFromString((calendars[ev.source] && calendars[ev.source].name) || ev.calendar_name || ev.subject || ev.title) || '-'}</span>
+                    <span className="col-status" data-label="Status">{''}</span>
                   </div>
                 ))}
               </div>
