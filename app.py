@@ -3755,10 +3755,6 @@ def admin_upload_rooms_publisher():
                 pc_dir.mkdir(exist_ok=True)
                 out_path = pc_dir / 'extract_stdout.txt'
                 err_path = pc_dir / 'extract_stderr.txt'
-                # Open files for Popen; close them right after Popen inherits
-                # the FDs to prevent file-descriptor leaks in the web worker.
-                out_f = open(out_path, 'a', encoding='utf-8')
-                err_f = open(err_path, 'a', encoding='utf-8')
                 # Prefer an explicit Python executable from the project venv if present
                 python_exec = os.environ.get('APP_PYTHON')
                 if not python_exec:
@@ -3774,13 +3770,19 @@ def admin_upload_rooms_publisher():
                 if not python_exec:
                     python_exec = sys.executable
 
-                # Use Popen so we don't block; start a new session so the child
-                # detaches from the web worker and continues independently.
-                proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=env, cwd=str(base), start_new_session=True, close_fds=True)
-                # Close the FDs in the parent process immediately — the child
-                # process inherited copies via close_fds=True + Popen.
-                out_f.close()
-                err_f.close()
+                # Open files for Popen; use try/finally so FDs are always
+                # closed in the parent even if Popen raises.
+                out_f = open(out_path, 'a', encoding='utf-8')
+                err_f = open(err_path, 'a', encoding='utf-8')
+                try:
+                    # Use Popen so we don't block; start a new session so the child
+                    # detaches from the web worker and continues independently.
+                    proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=env, cwd=str(base), start_new_session=True, close_fds=True)
+                finally:
+                    # Close the FDs in the parent process immediately — the child
+                    # process inherited copies via close_fds=True + Popen.
+                    out_f.close()
+                    err_f.close()
                 # Record detached-run metadata so the admin UI can detect the
                 # background process and report that an import is in progress.
                 try:
@@ -3887,7 +3889,8 @@ def admin_import_calendar():
         pc_dir.mkdir(exist_ok=True)
         out_path = pc_dir / 'extract_stdout.txt'
         err_path = pc_dir / 'extract_stderr.txt'
-        # Open files for Popen; close them right after Popen inherits the FDs.
+        # Open files for Popen; use try/finally so FDs are always closed
+        # in the parent even if Popen raises.
         out_f = open(out_path, 'a', encoding='utf-8')
         err_f = open(err_path, 'a', encoding='utf-8')
         # Prefer an explicit Python executable from the project venv if present
@@ -3904,10 +3907,12 @@ def admin_import_calendar():
         if not python_exec:
             python_exec = sys.executable
 
-        proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=os.environ.copy(), cwd=str(base), start_new_session=True, close_fds=True)
-        # Close the FDs in the parent — the child inherited copies.
-        out_f.close()
-        err_f.close()
+        try:
+            proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=os.environ.copy(), cwd=str(base), start_new_session=True, close_fds=True)
+        finally:
+            # Close the FDs in the parent — the child inherited copies.
+            out_f.close()
+            err_f.close()
 
         # Record detached-run metadata for UI detection
         try:
