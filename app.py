@@ -18,7 +18,7 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
 import signal
 
-from flask import Flask, render_template, request, redirect, url_for, send_file, jsonify, session, Response
+from flask import Flask, render_template, request, redirect, url_for, send_file, send_from_directory, jsonify, session, Response
 import hmac
 import secrets
 from collections import deque
@@ -585,6 +585,42 @@ def index():
     # Re-read and patch the file
     try:
         content = frontend_dist.read_text(encoding='utf-8')
+
+        # ── Fix stale asset hashes ──
+        # After a Vite rebuild the content-hash in filenames changes.
+        # If index.html references assets that no longer exist on disk
+        # (e.g. cached Docker layer mismatch) we rewrite the references
+        # to point at whatever file IS present.
+        import re as _re
+        assets_dir = frontend_dist.parent / 'assets'
+        if assets_dir.is_dir():
+            def _fix_asset_ref(m):
+                """Replace a stale /frontend/assets/xxx-HASH.ext ref with the actual file."""
+                full = m.group(0)       # e.g. /frontend/assets/index-OLD.css
+                fname = m.group(1)      # e.g. index-OLD.css
+                fpath = assets_dir / fname
+                if fpath.is_file():
+                    return full  # file exists, no fix needed
+                # Derive a glob pattern: keep the prefix before the first '-' and the extension
+                parts = fname.rsplit('.', 1)
+                if len(parts) != 2:
+                    return full
+                base, ext = parts
+                prefix = base.split('-')[0]  # "index" or "react-vendor" etc.
+                # Special case: multi-segment prefixes like "react-vendor"
+                # Use everything before the last '-' segment as prefix
+                segs = base.rsplit('-', 1)
+                if len(segs) == 2:
+                    prefix = segs[0]
+                for p in sorted(assets_dir.glob(f'{prefix}-*.{ext}')):
+                    return f'/frontend/assets/{p.name}'
+                return full  # give up, return original
+            content = _re.sub(
+                r'/frontend/assets/([a-zA-Z0-9_-]+\.[a-z]+)',
+                _fix_asset_ref,
+                content,
+            )
+
         if 'id="spa-fallback"' not in content:
             fallback = '''
     <!-- SPA runtime fallback: visible when JS errors or white screen -->
@@ -4399,41 +4435,40 @@ def delete_extracurricular_event():
 
 @app.route('/frontend/<path:filename>')
 def frontend_static(filename):
-    """Serve built frontend assets from frontend/dist."""
+    """Serve built frontend assets from frontend/dist.
+
+    Uses send_from_directory (sets correct MIME types and handles path
+    security).  When the exact file is missing (common after Vite rebuilds
+    change content hashes) we fall back to any same-kind file under the
+    assets/ subdirectory so stale browser caches still get CSS/JS.
+    """
     frontend_dist = pathlib.Path(__file__).parent / 'frontend' / 'dist'
+
+    # 1. Try exact file
     target = frontend_dist / filename
-    try:
-        if target.exists():
-            return send_file(target)
-    except Exception:
-        # fall through to fallback behaviour
-        pass
+    if target.is_file():
+        return send_from_directory(str(frontend_dist), filename)
 
-    # If the exact file is missing (common when hashes change after rebuild),
-    # attempt graceful fallbacks:
-    # 1. If requesting a JS/CSS asset, try to find a same-kind file under
-    #    frontend/dist/assets with a current hash (e.g., index-*.css).
-    # 2. Otherwise, return the built index.html so the SPA can bootstrap.
-    try:
-        assets_dir = frontend_dist / 'assets'
-        name = pathlib.Path(filename).name
-        if assets_dir.exists() and name.endswith('.css'):
-            # try to find any index-*.css
+    # 2. Hash-mismatch fallback: map stale asset name to current one
+    name = pathlib.Path(filename).name
+    assets_dir = frontend_dist / 'assets'
+    if assets_dir.is_dir():
+        if name.endswith('.css'):
             for p in assets_dir.glob('index-*.css'):
-                return send_file(p)
-        if assets_dir.exists() and name.endswith('.js'):
+                return send_from_directory(str(assets_dir), p.name)
+        if name.endswith('.js'):
+            # Prefer matching prefix (index-*, react-vendor-*, …)
+            prefix = name.split('-')[0] + '-' if '-' in name else 'index-'
+            for p in assets_dir.glob(f'{prefix}*.js'):
+                return send_from_directory(str(assets_dir), p.name)
+            # Broader fallback: any JS
             for p in assets_dir.glob('index-*.js'):
-                return send_file(p)
-    except Exception:
-        pass
+                return send_from_directory(str(assets_dir), p.name)
 
-    # Last-resort: serve the SPA index.html so the browser gets a valid page
-    try:
-        idx = frontend_dist / 'index.html'
-        if idx.exists():
-            return send_file(idx)
-    except Exception:
-        pass
+    # 3. SPA fallback — return index.html so client-side routing works
+    idx = frontend_dist / 'index.html'
+    if idx.is_file():
+        return send_from_directory(str(frontend_dist), 'index.html')
 
     return "Not found", 404
 
