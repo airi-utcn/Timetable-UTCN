@@ -897,10 +897,13 @@ def ensure_schedule(from_date: date, to_date: date):
     jpath = out_dir / 'schedule_by_room.json'
     cpath = out_dir / 'schedule_by_room.csv'
 
-    # Always build for the full ±60 day window regardless of the requested range.
+    # Build for a wider window so future semester events are included.
+    # Keep a small past buffer for today/previous day overlaps.
     today = date.today()
-    build_from = today - timedelta(days=60)
-    build_to   = today + timedelta(days=60)
+    _PAST_DAYS = 30
+    _FUTURE_DAYS = 240  # ~8 months ahead to cover full semester
+    build_from = today - timedelta(days=_PAST_DAYS)
+    build_to   = today + timedelta(days=_FUTURE_DAYS)
 
     # ── Fast path: if the schedule file exists and data hasn't changed, skip rebuild ──
     cur_mtime, cur_count = _events_files_fingerprint()
@@ -2560,17 +2563,17 @@ def events_json():
     room_filter = (request.values.get('room') or '').strip().lower()
     today = date.today()
     
-    # Always ensure we have 2 months of events stored
-    two_months_from_now = today + timedelta(days=60)
+    # Always ensure we have an extended window of events stored (full semester)
+    default_future = today + timedelta(days=240)
     
     try:
         from_date = date.fromisoformat(from_s) if from_s else today
     except Exception:
         from_date = today
     try:
-        to_date = date.fromisoformat(to_s) if to_s else two_months_from_now
+        to_date = date.fromisoformat(to_s) if to_s else default_future
     except Exception:
-        to_date = two_months_from_now
+        to_date = default_future
 
     # ensure schedule exists
     try:
