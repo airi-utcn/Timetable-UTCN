@@ -27,6 +27,11 @@ from dateutil import parser as dtparser
 import sys
 import hashlib
 
+# Ensure we can import modules from the project root (e.g., timetable.py)
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 # Ensure the process uses UTF-8 for stdout/stderr on Windows where the default
 # console encoding can be cp1252. Attempt to reconfigure the IO streams and
 # set PYTHONUTF8/PYTHONIOENCODING to help child processes and libraries.
@@ -45,6 +50,14 @@ except Exception:
 
 # Import parserul inteligent pentru subiecte
 from subject_parser import get_parser, learn_from_events, expand_title
+
+# Reuse the existing ICS parser from timetable so we can bypass Playwright when
+# the URL already points to a published .ics feed (these now trigger a direct
+# file download rather than a browsable HTML page).
+try:
+    from timetable import parse_ics_from_url
+except Exception:
+    parse_ics_from_url = None  # type: ignore
 
 
 def main():
@@ -76,6 +89,89 @@ def main():
 
     captured_json_texts = []
     captured_urls = []
+
+    # Fast-path: if the URL is already an .ics feed, fetch and parse it directly
+    # using the existing timetable helper instead of spinning up Playwright.
+    try:
+        url_l = (url or '').lower()
+    except Exception:
+        url_l = ''
+    if parse_ics_from_url and ('.ics' in url_l or url_l.startswith('webcal:')):
+        try:
+            parsed = parse_ics_from_url(url, verbose=True)
+            # Convert to the same dict shape used by the Playwright pipeline
+            events = []
+            for ev in parsed:
+                try:
+                    events.append({
+                        'start': ev.start.isoformat() if getattr(ev, 'start', None) else None,
+                        'end': ev.end.isoformat() if getattr(ev, 'end', None) else None,
+                        'title': getattr(ev, 'title', '') or '',
+                        'location': getattr(ev, 'location', '') or '',
+                        'raw': {},
+                    })
+                except Exception:
+                    continue
+
+            # Learn/expand subjects and dedupe like the Playwright path
+            learned = learn_from_events(events)
+            if learned:
+                print(f'Învățat {len(learned)} mapping-uri din titluri:')
+                for abbrev, name in sorted(learned.items()):
+                    print(f'  {abbrev} -> {name}')
+            for ev in events:
+                ev['title'] = expand_title(ev.get('title') or '')
+
+            deduped = []
+            seen_ids = set()
+            for ev in events:
+                raw = ev.get('raw') or {}
+                iid = None
+                if isinstance(raw, dict):
+                    iid = raw.get('ItemId', {}).get('Id') if raw.get('ItemId') else None
+                key = iid or (ev.get('title','') + '|' + (ev.get('start') or ''))
+                if key not in seen_ids:
+                    seen_ids.add(key)
+                    deduped.append(ev)
+
+            from subject_parser import get_mappings
+            mappings_file = out_dir / 'subject_mappings.json'
+            with open(mappings_file, 'w', encoding='utf-8') as f:
+                json.dump(get_mappings(), f, indent=2, ensure_ascii=False)
+            out_file = out_dir / 'events.json'
+            with open(out_file, 'w', encoding='utf-8') as f:
+                json.dump(deduped, f, indent=2, ensure_ascii=False, default=str)
+            print('Saved extracted events to', out_file)
+
+            # Pretty print summary
+            if deduped:
+                from collections import defaultdict
+                groups = defaultdict(list)
+                for ev in deduped:
+                    start_iso = ev.get('start')
+                    if start_iso:
+                        try:
+                            d = dtparser.parse(start_iso).date()
+                        except Exception:
+                            d = None
+                    else:
+                        d = None
+                    groups[str(d)].append(ev)
+
+                for day in sorted(groups.keys()):
+                    print('\n===', day)
+                    for ev in groups[day]:
+                        s = ev.get('start') or ''
+                        e = ev.get('end') or ''
+                        title = ev.get('title') or ''
+                        loc = ev.get('location') or ''
+                        print(f'  {s:25} -> {e:25}  {title}  @ {loc}')
+            else:
+                print('No events extracted from ICS response.')
+
+            return  # success path, skip Playwright
+        except Exception as e:
+            print('ICS parse failed, falling back to Playwright:', e)
 
     with sync_playwright() as p:
         # Use persistent context so we can reuse a logged-in session
