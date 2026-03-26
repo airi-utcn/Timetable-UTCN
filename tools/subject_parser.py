@@ -22,6 +22,37 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
+def _looks_like_name(s: str) -> bool:
+    """Heuristic to detect a person name like 'A. Groza' or 'Adrian Groza'."""
+    if not s:
+        return False
+    s = s.strip()
+    # Reject if too many words (likely a subject)
+    words = s.split()
+    if len(words) > 3:
+        return False
+    lower = s.lower()
+    subject_keywords = [
+        'programming', 'systems', 'engineering', 'intelligence', 'processing',
+        'structures', 'computer', 'software', 'design', 'analysis', 'networks',
+        'databases', 'security', 'algorithms', 'operating', 'functional',
+        'graphics', 'parallel', 'distributed', 'machine', 'learning', 'laboratory',
+        'lecture', 'exam', 'seminar'
+    ]
+    for kw in subject_keywords:
+        if kw in lower:
+            return False
+    if re.match(r'^[A-Z]\.[A-Za-z\-]+$', s):
+        return True
+    if re.match(r'^[A-Z]\.[A-Z]\.[A-Za-z\-]+$', s):
+        return True
+    if re.match(r'^[A-Z][a-z\-]+\s+[A-Z][a-z\-]+$', s) and len(words) == 2:
+        return True
+    if re.match(r'^[A-Z]\.?\s?[A-Za-z\-]+$', s):
+        return True
+    return False
+
+
 @dataclass
 class ParsedSubject:
     """Rezultatul parsării unui titlu de eveniment."""
@@ -73,6 +104,16 @@ class SubjectParser:
         r'(?:\s+(?P<room>[A-Z0-9\.\-]+(?:\s*\([^\)]+\))?))?'  # sală
         r'(?:\s*-\s*(?:optional|obligatoriu))?'  # opțional/obligatoriu
         r'(?:\s*\[(?P<type>[^\]]+)\])?'  # tip
+        r'[\s]*$',
+        re.IGNORECASE
+    )
+
+    # Pattern pentru formate de tip "Artificial Intelligence (lecture) - 3rd Year - A. Groza"
+    DESC_TITLE_PATTERN = re.compile(
+        r'^[\s]*'
+        r'(?P<name>[A-Za-z][A-Za-z\s\.]+?)'  # numele materiei
+        r'\s*\((?P<kind>lecture|laboratory|lab|seminar|exam|colocviu|curs|course)\)'  # tipul între paranteze
+        r'\s*(?P<rest>.*)?'  # orice text rămas (an, profesor, sală)
         r'[\s]*$',
         re.IGNORECASE
     )
@@ -155,6 +196,55 @@ class SubjectParser:
         if type_match:
             event_type = type_match.group(1).strip()
             title = title[:type_match.start()].strip()
+
+        # Caz: "Artificial Intelligence (lecture) - 3rd Year - A. Groza"
+        desc_match = self.DESC_TITLE_PATTERN.match(title)
+        if desc_match:
+            name = desc_match.group('name').strip()
+            kind = desc_match.group('kind').strip() if desc_match.group('kind') else None
+            rest = (desc_match.group('rest') or '').strip()
+            professor = None
+            if rest:
+                # încearcă să extragă profesorul din segmentele despărțite de '-' sau din token-urile finale
+                segments = [s.strip() for s in re.split(r'[-–]', rest) if s.strip()] or [rest]
+                for seg in reversed(segments):
+                    if _looks_like_name(seg):
+                        professor = seg
+                        break
+                    toks = [t for t in seg.split() if t]
+                    # întâi încearcă perechi (ex: "R. Slavescu") pentru a păstra inițiala
+                    for i in range(len(toks)-1, 0, -1):
+                        pair = toks[i-1] + ' ' + toks[i]
+                        if _looks_like_name(pair):
+                            professor = pair
+                            break
+                    if professor:
+                        break
+                    # apoi verifică token-uri individuale
+                    for i in range(len(toks)-1, -1, -1):
+                        if _looks_like_name(toks[i]):
+                            professor = toks[i]
+                            break
+                    if professor:
+                        break
+
+            # Formatează numele materiei
+            name = ' '.join(word.capitalize() for word in name.split())
+            display = name
+            if kind:
+                display += f" ({kind.capitalize()})"
+            if professor:
+                display += f" - {professor}"
+
+            return ParsedSubject(
+                original=original,
+                subject_name=name,
+                abbreviation=None,
+                professor=professor,
+                room_code=None,
+                event_type=kind or event_type,
+                display_title=display
+            )
         
         # Încearcă pattern-ul complet primul
         match = self.FULL_TITLE_PATTERN.match(original)
@@ -257,18 +347,16 @@ class SubjectParser:
                     display_title=display
                 )
         
-        # Fallback: returnează titlul original curățat
-        # Curăță spațiile multiple și tab-urile
+        # Fallback: returnează titlul curățat și normalizează descriptorii / numele
         clean_title = re.sub(r'\s+', ' ', title).strip()
 
-        # Dacă titlul conține un dash '-', considerăm partea din stânga
-        # ca fiind numele materiei (ex: "Software Engineering - E. Todoran" -> "Software Engineering").
-        # Acceptăm atât variante cu spații în jurul dash-ului cât și dash simplu.
+        # Elimină descriptorii comuni din paranteze (lecture, laboratory, exam etc.) pentru numele materiei
+        clean_title = re.sub(r'\((?i:lecture|laboratory|lab|seminar|exam|colocviu|course|curs|practice|p)\)', '', clean_title, flags=re.IGNORECASE).strip()
+
+        # Dacă titlul conține un dash '-', considerăm partea din stânga ca nume materie
         left_part = re.split(r'\s*-\s*', clean_title, maxsplit=1)[0].strip()
 
-        # Curățăm indicatori comuni precum '(Practice)', '(p)' sau cuvântul 'practice'
-        # deoarece nu fac parte din numele materiei.
-        left_part = re.sub(r'\((?i:practice|p)\)', '', left_part, flags=re.IGNORECASE).strip()
+        # Curăță indicatori "practice" rămași
         left_part = re.sub(r'\bpractice\b', '', left_part, flags=re.IGNORECASE).strip()
 
         # Normalizează spațiile multiple

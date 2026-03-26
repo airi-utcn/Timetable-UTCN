@@ -1,16 +1,43 @@
 #!/usr/bin/env bash
 # deploy.sh - Comprehensive deployment script for the UTCN timetable app
-# - pulls latest code, rebuilds images, starts containers
-# - waits for app health, runs a full extraction and a single worker merge pass
-# - shows useful status and logs
+# What it does:
+#   - verifies prerequisites (git, docker, docker compose, curl)
+#   - pulls latest code, ensures .env exists, rebuilds images, starts stack
+#   - optionally prunes, runs full extraction or worker-once
+#   - waits for health and prints status/logs
 # Usage: ./deploy.sh
 
 set -euo pipefail
 
+# ---------- helpers ----------
+color() { local c="$1"; shift; printf "\033[%sm%s\033[0m" "$c" "$*"; }
+info()  { printf "%s %s\n" "$(color 1; color 34 "[INFO]")" "$*"; }
+warn()  { printf "%s %s\n" "$(color 1; color 33 "[WARN]")" "$*"; }
+err()   { printf "%s %s\n" "$(color 1; color 31 "[ERROR]")" "$*"; }
+die()   { err "$*"; exit 1; }
+
+require_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "Missing required command: $1"
+}
+
+# docker compose shim: prefer `docker compose`, fall back to docker-compose
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+	DC=(docker compose)
+elif command -v docker-compose >/dev/null 2>&1; then
+	DC=(docker-compose)
+else
+	die "docker compose not found; install Docker with Compose V2"
+fi
+
+require_cmd git
+require_cmd docker
+require_cmd curl
+require_cmd sed
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
-echo "=== UTCN Timetable Full Deploy ==="
+info "=== UTCN Timetable Full Deploy ==="
 
 # Configurable flags (export or edit if you want to change defaults)
 DO_PRUNE=${DO_PRUNE:-false}                 # set true to prune unused images
@@ -27,8 +54,18 @@ HEALTH_WAIT_SECONDS=${HEALTH_WAIT_SECONDS:-60}
 echo "📥 Pulling latest code from git..."
 git pull origin main
 
+if ! git diff --quiet || ! git diff --cached --quiet; then
+	warn "Git working tree is dirty; consider committing or stashing local changes before deploy"
+fi
+
+if [ ! -f .env ] && [ -f .env.example ]; then
+	warn ".env not found; copying from .env.example"
+	cp .env.example .env
+	warn "Edit .env to configure ADMIN_PASSWORD, PLAYWRIGHT creds, and secrets as needed"
+fi
+
 echo "🔧 Stopping existing containers (preserve volumes)..."
-docker compose down --remove-orphans || true
+"${DC[@]}" down --remove-orphans || true
 
 if [ "$DO_PRUNE" = "true" ]; then
 	echo "🧹 Pruning unused images and containers..."
@@ -36,10 +73,10 @@ if [ "$DO_PRUNE" = "true" ]; then
 fi
 
 echo "🔨 Building Docker images (parallel, with BuildKit)..."
-DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 docker compose build --parallel
+DOCKER_BUILDKIT=1 COMPOSE_DOCKER_CLI_BUILD=1 "${DC[@]}" build --parallel
 
 echo "🚀 Starting containers..."
-docker compose up -d
+"${DC[@]}" up -d
 
 if [ "$WAIT_FOR_HEALTH" = "true" ]; then
 	echo "⏳ Waiting up to ${HEALTH_WAIT_SECONDS}s for app health (http://localhost:5000/health)"
@@ -60,7 +97,7 @@ fi
 if [ "$RUN_FULL_EXTRACTION" = "true" ]; then
 	echo "🔁 Running full extraction for all enabled calendars (this may take long)..."
 	# Run inside the timetable service container so environment and Playwright are available
-	docker compose exec -T timetable sh -c 'export PYTHONUTF8=1; python3 tools/run_full_extraction.py'
+	"${DC[@]}" exec -T timetable sh -c 'export PYTHONUTF8=1; python3 tools/run_full_extraction.py'
 	echo "✅ Full extraction finished (check playwright_captures/*.json)"
 fi
 
@@ -73,21 +110,21 @@ fi
 #   docker compose exec timetable python3 tools/worker_update_future.py
 if [ "$RUN_WORKER_ONCE" = "true" ]; then
 	echo "🔧 Running worker once (merge future events, rebuild schedule)..."
-	docker compose exec -T timetable sh -c 'export PYTHONUTF8=1; RUN_ONCE=1 python3 tools/worker_update_future.py'
+	"${DC[@]}" exec -T timetable sh -c 'export PYTHONUTF8=1; RUN_ONCE=1 python3 tools/worker_update_future.py'
 	echo "✅ Worker RUN_ONCE finished"
 fi
 
 echo ""
 echo "📦 Docker compose status:"
-docker compose ps
+"${DC[@]}" ps
 
 echo ""
 echo "📄 Last schedule file info (playwright_captures/schedule_by_room.json):"
-docker compose exec -T timetable sh -c 'ls -lh playwright_captures/schedule_by_room.json || true'
+"${DC[@]}" exec -T timetable sh -c 'ls -lh playwright_captures/schedule_by_room.json || true'
 
 echo ""
 echo "📋 Tail of application logs (last 200 lines):"
-docker compose logs --no-color --tail=200
+"${DC[@]}" logs --no-color --tail=200
 
 echo ""
 echo "✅ Deployment script finished. Visit: http://localhost:5000/"

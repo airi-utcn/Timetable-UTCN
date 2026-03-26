@@ -9,8 +9,34 @@ Extrage:
 import re
 import json
 import pathlib
+import sys
 from dataclasses import dataclass
 from typing import Optional, Dict
+
+# Ensure project root is on sys.path so imports work when invoked as module or script
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# Prefer the smarter subject/location parser for consistency across pipeline
+parse_subject_title = None  # type: ignore
+parse_subject_location = None  # type: ignore
+ParsedSubject = None  # type: ignore
+try:
+    from tools import subject_parser as _sp  # type: ignore
+except Exception:
+    try:
+        import subject_parser as _sp  # type: ignore
+    except Exception:
+        _sp = None
+
+if _sp:
+    try:
+        parse_subject_title = _sp.parse_title
+        parse_subject_location = _sp.parse_location
+        ParsedSubject = getattr(_sp, 'ParsedSubject', None)
+    except Exception:
+        pass
 
 # Mapping-uri pentru clădiri UTCN
 BUILDING_ALIASES = {
@@ -160,47 +186,71 @@ def parse_location_text(text: str) -> Dict[str, str]:
 
 
 def parse_location(location: str) -> Dict[str, str]:
-    """Parsează locația din orice format (email sau text)."""
+    """Parsează locația din orice format (email sau text).
+
+    Preferă parserul din subject_parser pentru consistență cu build_schedule.
+    """
+    if parse_subject_location:
+        try:
+            ploc = parse_subject_location(location or '')
+            return {
+                'building': ploc.building_name or ploc.building_code or '',
+                'room': ploc.room or '',
+                'room_code': ploc.room_normalized or ploc.room or '',
+            }
+        except Exception:
+            pass
+
     if not location:
         return {'building': '', 'room': '', 'room_code': ''}
-    
-    # Dacă e email
+
     if '@' in location and 'utcn_room' in location.lower():
         return parse_location_email(location)
-    
-    # Altfel e text
+
     return parse_location_text(location)
 
 
 def parse_title(title: str) -> ParsedEvent:
     """Parsează titlul unui eveniment.
-    
-    Formate suportate:
-        1. "Materie - Profesor" -> subject=Materie, professor=Profesor
-        2. "Materie (ABREV) - Profesor - Sala [In-person]"
-        3. "ABREV Sala [In-person]" -> subject=ABREV, room=Sala
-        4. "Materie" -> subject=Materie
+
+    Folosește parserul avansat din subject_parser pentru consistență cu
+    extracția și cu build_schedule. Dacă nu e disponibil, cade pe vechiul
+    comportament minimal.
     """
+    # Dacă avem parserul inteligent, folosește-l și mapează către ParsedEvent
+    if parse_subject_title:
+        try:
+            parsed = parse_subject_title(title or '')
+            # ParsedSubject -> ParsedEvent
+            return ParsedEvent(
+                original_title=title or '',
+                subject=parsed.subject_name or '',
+                abbreviation=(parsed.abbreviation or '') if hasattr(parsed, 'abbreviation') else '',
+                professor=parsed.professor or '',
+                room_code=parsed.room_code or '',
+                event_type=parsed.event_type or '',
+                is_lab=bool(getattr(parsed, 'is_practice', False) or (parsed.event_type or '').lower() in ('lab', 'laboratory', 'seminar')),
+                display_title=parsed.display_title or parsed.subject_name or (title or ''),
+            )
+        except Exception:
+            # fall through to legacy heuristics
+            pass
+
+    # --- Legacy heuristics (kept as fallback) ---
     result = ParsedEvent(original_title=title)
-    
     if not title:
         return result
-    
-    # Curăță titlul
     title = title.strip()
-    
-    # Extrage [In-person], [Online] etc
+
     type_match = re.search(r'\[([^\]]+)\]', title)
     if type_match:
         result.event_type = type_match.group(1).strip()
         title = title[:type_match.start()].strip()
-    
-    # Verifică dacă e laborator/seminar
+
     title_lower = title.lower()
     if ' p ' in f' {title_lower} ' or 'seminar' in title_lower or 'lab' in title_lower:
         result.is_lab = True
-    
-    # Încearcă formatul complet: "Nume materie (ABREV) - Profesor - Sala"
+
     full_match = re.match(
         r'^(.+?)\s*\(([A-Z]{2,6})\)\s*-\s*([^-]+?)(?:\s*-\s*(.+))?$',
         title,
@@ -214,57 +264,40 @@ def parse_title(title: str) -> ParsedEvent:
             result.room_code = full_match.group(4).strip()
         result.display_title = result.subject
         return result
-    
-    # Încearcă formatul simplu cu liniuță: "Materie - Profesor"
+
     if ' - ' in title:
         parts = title.split(' - ', 1)
         result.subject = parts[0].strip()
-        
-        # Partea după - poate fi profesor sau poate conține și sala
         if len(parts) > 1:
             after_dash = parts[1].strip()
-            
-            # Dacă e gol (doar "Materie - "), nu avem profesor
             if not after_dash:
                 result.display_title = result.subject
                 return result
-            
-            # Verifică dacă e "Profesor - Sala" sau doar "Profesor"
             if ' - ' in after_dash:
                 prof_parts = after_dash.split(' - ', 1)
                 result.professor = prof_parts[0].strip()
                 result.room_code = prof_parts[1].strip() if len(prof_parts) > 1 else ''
             else:
-                # Poate fi profesor sau poate fi gol (doar liniuță)
                 if after_dash:
                     result.professor = after_dash
-        
         result.display_title = result.subject
         return result
-    
-    # Verifică dacă titlul se termină cu " - " (fără profesor)
+
     if title.rstrip().endswith(' -') or title.rstrip().endswith('-'):
         result.subject = title.rstrip().rstrip('-').strip()
         result.display_title = result.subject
         return result
-    
-    # Format scurt: "ABREV Sala" sau "ABREV p Sala" (laborator)
-    # ABREV trebuie să fie uppercase (ex: "FP", "AI", "SCS")
-    short_match = re.match(
-        r'^([A-Z]{2,6})(?:\s+p)?\s+(.+)$',
-        title
-    )
+
+    short_match = re.match(r'^([A-Z]{2,6})(?:\s+p)?\s+(.+)$', title)
     if short_match:
         abbrev = short_match.group(1)
-        # Verifică că e efectiv o abreviere (toate literele uppercase)
         if abbrev.isupper():
             result.abbreviation = abbrev
-            result.subject = result.abbreviation  # Folosim abrevierea ca subject
+            result.subject = result.abbreviation
             result.room_code = short_match.group(2).strip()
             result.display_title = result.abbreviation
             return result
-    
-    # Fallback: titlul e doar materia
+
     result.subject = title
     result.display_title = title
     return result
