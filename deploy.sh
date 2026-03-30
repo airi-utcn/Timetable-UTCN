@@ -50,6 +50,7 @@ RUN_WORKER_ONCE=${RUN_WORKER_ONCE:-false}
 INSTALL_SYSTEMD_TIMER=${INSTALL_SYSTEMD_TIMER:-false} # set true to install systemd timer (must run as root)
 WAIT_FOR_HEALTH=${WAIT_FOR_HEALTH:-true}
 HEALTH_WAIT_SECONDS=${HEALTH_WAIT_SECONDS:-60}
+RUN_LOCAL_ADMIN_TEST=${RUN_LOCAL_ADMIN_TEST:-true}
 
 echo "📥 Pulling latest code from git..."
 git pull origin main
@@ -61,7 +62,48 @@ fi
 if [ ! -f .env ] && [ -f .env.example ]; then
 	warn ".env not found; copying from .env.example"
 	cp .env.example .env
-	warn "Edit .env to configure ADMIN_PASSWORD, PLAYWRIGHT creds, and secrets as needed"
+	warn "Copied .env.example -> .env. Edit .env to configure ADMIN_PASSWORD, PLAYWRIGHT creds, and secrets as needed"
+fi
+
+# Ensure some critical env values exist and are reasonably secure for local deploy.
+# We source the .env in a safe/exporting way, generate FLASK_SECRET if missing,
+# and warn if ADMIN_PASSWORD is the default.
+if [ -f .env ]; then
+	# export variables from .env to access them in this script (simple, not for production secret management)
+	set -a
+	# shellcheck disable=SC1091
+	. ./.env || true
+	set +a
+
+	# Generate a FLASK_SECRET if not set
+	if [ -z "${FLASK_SECRET:-}" ]; then
+		info "Generating a random FLASK_SECRET and appending to .env"
+		# 32 bytes hex = 64 chars
+		FLASK_SECRET_VAL=$(openssl rand -hex 32 2>/dev/null || python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)
+		printf "\nFLASK_SECRET=%s\n" "$FLASK_SECRET_VAL" >> .env
+		export FLASK_SECRET="$FLASK_SECRET_VAL"
+	fi
+
+	# Ensure ADMIN_USERNAME/ADMIN_PASSWORD exist in .env; if not, append defaults from example
+	if [ -z "${ADMIN_USERNAME:-}" ]; then
+		info "ADMIN_USERNAME missing in .env; defaulting to 'admin' (edit .env to change)"
+		printf "\nADMIN_USERNAME=admin\n" >> .env
+		export ADMIN_USERNAME=admin
+	fi
+	if [ -z "${ADMIN_PASSWORD:-}" ]; then
+		warn "ADMIN_PASSWORD missing in .env; defaulting to 'admin123' (edit .env to change)"
+		printf "\nADMIN_PASSWORD=admin123\n" >> .env
+		export ADMIN_PASSWORD=admin123
+	fi
+
+	# Warn if using weak default password
+	if [ "${ADMIN_PASSWORD}" = "admin123" ]; then
+		warn "Using default ADMIN_PASSWORD 'admin123' — consider setting a stronger password in .env"
+	fi
 fi
 
 echo "🔧 Stopping existing containers (preserve volumes)..."
@@ -91,6 +133,55 @@ if [ "$WAIT_FOR_HEALTH" = "true" ]; then
 	else
 		echo "\n⚠️ App did not report healthy within ${HEALTH_WAIT_SECONDS}s; check logs"
 	fi
+fi
+
+# Optional: test local admin form login using credentials in .env (useful to verify
+# the app received ADMIN_USERNAME/ADMIN_PASSWORD correctly into the container).
+if [ "${RUN_LOCAL_ADMIN_TEST}" = "true" ]; then
+	info "Running local admin form-login test (http://localhost:5000/admin)"
+	# Load environment values from .env (if present)
+	if [ -f .env ]; then
+		set -a
+		# shellcheck disable=SC1091
+		. ./.env || true
+		set +a
+	fi
+
+	# Prepare temp files
+	ADMIN_TEST_DIR=$(mktemp -d 2>/dev/null || echo /tmp)
+	ADMIN_GET_HTML="$ADMIN_TEST_DIR/admin_get.html"
+	ADMIN_LOGIN_HTML="$ADMIN_TEST_DIR/admin_login.html"
+	COOKIES_FILE="$ADMIN_TEST_DIR/admin_cookies.txt"
+
+	# Do GET to extract CSRF token and initial session cookie
+	curl -s -c "$COOKIES_FILE" "http://localhost:5000/admin" -o "$ADMIN_GET_HTML" || true
+	csrf_token=$(grep -oP 'name="csrf_token" value="\K[^"]+' "$ADMIN_GET_HTML" || true)
+	if [ -z "$csrf_token" ]; then
+		warn "Could not extract CSRF token from /admin; check app logs"
+	else
+		# Perform POST with credentials
+		USERNAME_VAL="${ADMIN_USERNAME:-admin}"
+		PASSWORD_VAL="${ADMIN_PASSWORD:-admin123}"
+		curl -s -b "$COOKIES_FILE" -c "$COOKIES_FILE" -i -L -X POST 'http://localhost:5000/admin/login' \
+			--data-urlencode "username=${USERNAME_VAL}" \
+			--data-urlencode "password=${PASSWORD_VAL}" \
+			--data-urlencode "csrf_token=${csrf_token}" \
+			-H 'Referer: http://localhost:5000/admin' \
+			-A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36' \
+			-o "$ADMIN_LOGIN_HTML" || true
+
+		# Inspect login result
+		if grep -q -i "Invalid credentials" "$ADMIN_LOGIN_HTML" || grep -q -i "Invalid CSRF" "$ADMIN_LOGIN_HTML"; then
+			err "Local admin login test failed: server returned invalid credentials / CSRF message. Check .env and container logs."
+			echo "---- login response head ----"
+			head -n 80 "$ADMIN_LOGIN_HTML" || true
+			echo "---- end response ----"
+		else
+			info "Local admin form-login appears successful (login POST accepted)."
+		fi
+	fi
+	# cleanup
+	rm -rf "$ADMIN_TEST_DIR" || true
 fi
 
 # Run the long-running full extraction (populate per-calendar files) inside container
