@@ -51,3 +51,4 @@ pytest.ini
 
 # Documentation duplicates
 README\ 2.md
+.env

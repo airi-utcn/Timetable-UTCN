@@ -103,9 +103,14 @@ def _read_json_cached(file_path: str, ttl: int = _FILE_CACHE_TTL):
 
 # Admin authentication
 # Defaults kept to preserve existing tests; change via env in production
-ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "admin123")  # Change in production!
+_raw_user = os.environ.get("ADMIN_USERNAME", "").strip().strip('\'"')
+_raw_pass = os.environ.get("ADMIN_PASSWORD", "").strip().strip('\'"')
+ADMIN_USERNAME = _raw_user if _raw_user else "admin"
+ADMIN_PASSWORD = _raw_pass if _raw_pass else "admin123"
 ADMIN_SESSION_TIMEOUT = int(os.environ.get("ADMIN_SESSION_TIMEOUT", 3600))  # seconds
+
+# Debug: Print loaded admin configured credentials length to verify loading.
+print(f"[INIT] Admin username configured: '{ADMIN_USERNAME}' (password length: {len(ADMIN_PASSWORD)})", flush=True)
 
 # Simple in-memory rate limiter for failed admin auth attempts by remote IP.
 # Keeps recent failure timestamps (seconds) and blocks after a threshold.
@@ -224,8 +229,12 @@ def require_admin(f):
 
 def _validate_credentials(username: str | None, password: str | None) -> bool:
     """Timing-safe validation of provided username/password."""
-    user_ok = hmac.compare_digest(str(username or ''), str(ADMIN_USERNAME))
-    pass_ok = hmac.compare_digest(str(password or ''), str(ADMIN_PASSWORD))
+    # Strip whitespace from input just in case of copy-paste errors
+    clean_user = str(username or '').strip()
+    clean_pass = str(password or '').strip()
+    
+    user_ok = hmac.compare_digest(clean_user, str(ADMIN_USERNAME))
+    pass_ok = hmac.compare_digest(clean_pass, str(ADMIN_PASSWORD))
     return user_ok and pass_ok
 
 
