@@ -18,6 +18,13 @@ from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
 import signal
 
+# Load environment from .env if present (local/dev convenience)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
+
 from flask import Flask, render_template, request, redirect, url_for, send_file, send_from_directory, jsonify, session, Response
 import hmac
 import secrets

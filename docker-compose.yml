@@ -16,6 +16,7 @@ services:
     environment:
       - FLASK_ENV=production
       - FLASK_SECRET=${FLASK_SECRET:-change-me-in-production}
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
       - PLAYWRIGHT_USER_DATA_DIR=/app/playwright_data
       - APP_PYTHON=/usr/local/bin/python3

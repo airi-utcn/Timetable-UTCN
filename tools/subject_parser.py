@@ -197,6 +197,15 @@ class SubjectParser:
             event_type = type_match.group(1).strip()
             title = title[:type_match.start()].strip()
 
+        # Extrage tipul evenimentului din paranteze la final (ex: "(seminar)")
+        paren_type = None
+        m_paren = re.search(r'\((lecture|laboratory|lab|seminar|exam|colocviu|curs|course)\)\s*$', title, re.IGNORECASE)
+        if m_paren:
+            paren_type = m_paren.group(1).strip().lower()
+            title = title[:m_paren.start()].strip()
+            if not event_type:
+                event_type = paren_type
+
         # Caz: "Artificial Intelligence (lecture) - 3rd Year - A. Groza"
         desc_match = self.DESC_TITLE_PATTERN.match(title)
         if desc_match:
@@ -243,6 +252,63 @@ class SubjectParser:
                 professor=professor,
                 room_code=None,
                 event_type=kind or event_type,
+                display_title=display
+            )
+
+        # Caz: titluri cu segmente separate prin "/" care includ an/seria/room
+        # ex: "Fizica Seminar/ An I / Seria B/ 32109"
+        segments = [seg.strip(' -') for seg in title.split('/') if seg.strip()]
+        if len(segments) >= 2:
+            subj_seg = segments[0]
+            room_code = None
+            group = None
+            year = None
+            for seg in segments[1:]:
+                seg_low = seg.lower()
+                if 'seria' in seg_low or 'serie' in seg_low:
+                    m = re.search(r'(seria|serie)\s*([A-Za-z0-9]+)', seg, re.IGNORECASE)
+                    if m:
+                        group = m.group(2).upper()
+                        continue
+                if 'group' in seg_low:
+                    m = re.search(r'group\s*([A-Za-z0-9]+)', seg, re.IGNORECASE)
+                    if m:
+                        group = m.group(1).upper()
+                        continue
+                if 'an' in seg_low:
+                    m = re.search(r'an\s*([IVX0-9]+)', seg, re.IGNORECASE)
+                    if m:
+                        token = m.group(1).upper()
+                        roman_map = {'I': '1', 'II': '2', 'III': '3', 'IV': '4'}
+                        year = roman_map.get(token, token)
+                        continue
+                if re.match(r'^[0-9]{3,4}$', seg.strip()):
+                    room_code = seg.strip()
+                    continue
+                # fallback: if contains digits, maybe room
+                m = re.search(r'([0-9]{3,4})', seg)
+                if m:
+                    room_code = m.group(1)
+
+            subject_name = ' '.join(word.capitalize() for word in subj_seg.split()) if subj_seg else subj_seg
+            display = subject_name
+            et_label = (event_type or '').capitalize() if event_type else None
+            if et_label:
+                display += f" ({et_label})"
+            if group:
+                display += f" - Group {group}"
+            if year:
+                display += f" - Year {year}"
+            if room_code:
+                display += f" - Room {room_code}"
+
+            return ParsedSubject(
+                original=original,
+                subject_name=subject_name,
+                abbreviation=None,
+                professor=None,
+                room_code=room_code,
+                event_type=event_type,
                 display_title=display
             )
         
