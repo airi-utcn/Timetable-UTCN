@@ -68,42 +68,51 @@ fi
 # Ensure some critical env values exist and are reasonably secure for local deploy.
 # We source the .env in a safe/exporting way, generate FLASK_SECRET if missing,
 # and warn if ADMIN_PASSWORD is the default.
-if [ -f .env ]; then
-	# export variables from .env to access them in this script (simple, not for production secret management)
-	set -a
-	# shellcheck disable=SC1091
-	. ./.env || true
-	set +a
+if [ ! -f .env ]; then
+    touch .env
+fi
 
-	# Generate a FLASK_SECRET if not set
-	if [ -z "${FLASK_SECRET:-}" ]; then
-		info "Generating a random FLASK_SECRET and appending to .env"
-		# 32 bytes hex = 64 chars
-		FLASK_SECRET_VAL=$(openssl rand -hex 32 2>/dev/null || python3 - <<'PY'
+# export variables from .env to access them in this script
+set -a
+# shellcheck disable=SC1091
+. ./.env || true
+set +a
+
+# Clean invalid values (like the default 'your-secure-password-here' from .env.example)
+if grep -q "your-secure-password-here" .env; then
+    warn "Found dummy password 'your-secure-password-here' in .env. Replacing with 'admin123'."
+    sed -i.bak 's/your-secure-password-here/admin123/' .env
+    export ADMIN_PASSWORD=admin123
+fi
+
+# Generate a FLASK_SECRET if not set
+if [ -z "${FLASK_SECRET:-}" ]; then
+    info "Generating a random FLASK_SECRET and appending to .env"
+    # 32 bytes hex = 64 chars
+    FLASK_SECRET_VAL=$(openssl rand -hex 32 2>/dev/null || python3 - <<'PY'
 import secrets
 print(secrets.token_hex(32))
 PY
 )
-		printf "\nFLASK_SECRET=%s\n" "$FLASK_SECRET_VAL" >> .env
-		export FLASK_SECRET="$FLASK_SECRET_VAL"
-	fi
+    printf "\nFLASK_SECRET=%s\n" "$FLASK_SECRET_VAL" >> .env
+    export FLASK_SECRET="$FLASK_SECRET_VAL"
+fi
 
-	# Ensure ADMIN_USERNAME/ADMIN_PASSWORD exist in .env; if not, append defaults from example
-	if [ -z "${ADMIN_USERNAME:-}" ]; then
-		info "ADMIN_USERNAME missing in .env; defaulting to 'admin' (edit .env to change)"
-		printf "\nADMIN_USERNAME=admin\n" >> .env
-		export ADMIN_USERNAME=admin
-	fi
-	if [ -z "${ADMIN_PASSWORD:-}" ]; then
-		warn "ADMIN_PASSWORD missing in .env; defaulting to 'admin123' (edit .env to change)"
-		printf "\nADMIN_PASSWORD=admin123\n" >> .env
-		export ADMIN_PASSWORD=admin123
-	fi
+# Ensure ADMIN_USERNAME/ADMIN_PASSWORD exist in .env; if not, append defaults from example
+if [ -z "${ADMIN_USERNAME:-}" ]; then
+    info "ADMIN_USERNAME missing in .env; defaulting to 'admin' (edit .env to change)"
+    printf "\nADMIN_USERNAME=admin\n" >> .env
+    export ADMIN_USERNAME=admin
+fi
+if [ -z "${ADMIN_PASSWORD:-}" ]; then
+    warn "ADMIN_PASSWORD missing in .env; defaulting to 'admin123' (edit .env to change)"
+    printf "\nADMIN_PASSWORD=admin123\n" >> .env
+    export ADMIN_PASSWORD=admin123
+fi
 
-	# Warn if using weak default password
-	if [ "${ADMIN_PASSWORD}" = "admin123" ]; then
-		warn "Using default ADMIN_PASSWORD 'admin123' — consider setting a stronger password in .env"
-	fi
+# Warn if using weak default password
+if [ "${ADMIN_PASSWORD}" = "admin123" ]; then
+	warn "Using default ADMIN_PASSWORD 'admin123' — consider setting a stronger password in .env"
 fi
 
 echo "🔧 Stopping existing containers (preserve volumes)..."
