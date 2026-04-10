@@ -293,6 +293,22 @@ export default function Admin() {
 
         {/* Manual events UI removed */}
       </div>
+
+      <div className="admin-help">
+        <p>
+          📖 <strong>Need help?</strong> Check the 
+          {' '}
+          <a 
+            href="https://didatec-my.sharepoint.com/:b:/g/personal/norina_herki_campus_utcluj_ro/IQDRjcNWter3T5KD0Zd1XehiASHSf3nUyD4tArZ-O5VmfpE?e=KeJetN" 
+            target="_blank" 
+            rel="noopener noreferrer"
+          >
+            User Guide
+          </a>
+          {' '}
+          for detailed instructions.
+        </p>
+      </div>
     </div>
   )
 }

@@ -113,6 +113,16 @@ export default function App() {
         <div className="footer-content">
           <p>© 2026 Technical University of Cluj-Napoca</p>
           <p className="footer-note">Schedule Management System • Auto-refresh every hour</p>
+          <p className="footer-help">
+            <a 
+              href="https://didatec-my.sharepoint.com/:b:/g/personal/norina_herki_campus_utcluj_ro/IQDRjcNWter3T5KD0Zd1XehiASHSf3nUyD4tArZ-O5VmfpE?e=KeJetN" 
+              target="_blank" 
+              rel="noopener noreferrer"
+              title="User guide for the Timetable application"
+            >
+              📖 User Guide
+            </a>
+          </p>
         </div>
       </footer>
     </div>

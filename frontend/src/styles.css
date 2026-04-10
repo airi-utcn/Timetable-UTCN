@@ -93,6 +93,17 @@ body {
   font-size: 0.85rem;
 }
 .footer-note { opacity: 0.7; margin-top: 4px; }
+.footer-help { margin-top: 8px; }
+.footer-help a {
+  color: var(--utcn-gold);
+  text-decoration: none;
+  transition: color 0.2s ease;
+  font-weight: 500;
+}
+.footer-help a:hover {
+  color: var(--white);
+  text-decoration: underline;
+}
 
 /* Containers */
 .schedule-container, .departures-container, .admin-container {
@@ -537,6 +548,26 @@ body {
 .admin-section { padding: 20px; border-bottom: 1px solid var(--gray-200); }
 .admin-section:last-child { border-bottom: none; }
 .admin-section .section-header { margin: -20px -20px 16px -20px; border-radius: 0; }
+
+.admin-help {
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--gray-50);
+  border: 1px solid var(--gray-200);
+  border-radius: 8px;
+  font-size: 0.9rem;
+  text-align: center;
+}
+.admin-help a {
+  color: var(--utcn-accent);
+  text-decoration: none;
+  font-weight: 600;
+  transition: color 0.2s ease;
+}
+.admin-help a:hover {
+  color: var(--utcn-blue-light);
+  text-decoration: underline;
+}
 
 .stats-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
 .stat-card {
