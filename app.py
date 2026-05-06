@@ -2652,8 +2652,14 @@ def events_json():
                         parsed_building = parsed.get('building', '')
                         parsed_room = parsed.get('room', '')
                         display_title = parsed.get('display_title', '') or title
+                        parsed_year = parsed.get('year', '')
+                        parsed_group = parsed.get('group', '')
                     except Exception:
-                        pass
+                        parsed_year = ''
+                        parsed_group = ''
+                else:
+                    parsed_year = ''
+                    parsed_group = ''
                 
                 # Fallback to existing data if parser didn't find anything
                 subject = parsed_subject or (e.get('subject') or '')
@@ -2682,9 +2688,9 @@ def events_json():
                     'color': None,
                     'source': e.get('source') if isinstance(e, dict) else None,
                     'calendar_name': None,
-                    'year': '',
-                    'group': '',
-                    'group_display': '',
+                    'year': parsed_year,
+                    'group': parsed_group,
+                    'group_display': parsed_group or '',
                 }
                 # resolve color and calendar_name from merged metadata or calendar_map
                 try:
@@ -2703,15 +2709,16 @@ def events_json():
                     # ignore any errors resolving calendar metadata
                     pass
 
-                # Try to parse group/year from calendar_name or subject/display_title
+                # Try to parse group/year from calendar_name or title if parser didn't find it
                 try:
                     from tools.event_parser import parse_group_from_string
-                    sample = ev.get('calendar_name') or ev.get('subject') or ev.get('display_title') or ''
-                    grp = parse_group_from_string(sample)
-                    if grp and isinstance(grp, dict):
-                        ev['year'] = grp.get('year', '')
-                        ev['group'] = grp.get('group', '')
-                        ev['group_display'] = grp.get('display', '')
+                    if not ev.get('year'):
+                        sample = ev.get('calendar_name') or ev.get('title') or ''
+                        grp = parse_group_from_string(sample)
+                        if grp and isinstance(grp, dict):
+                            ev['year'] = grp.get('year', '')
+                            ev['group'] = grp.get('group', '')
+                            ev['group_display'] = grp.get('display', '')
                 except Exception:
                     pass
 
@@ -2995,13 +3002,27 @@ def saved_response(fname: str):
 @app.route('/departures')
 def departures_view():
     """Departure board style view - shows today's and tomorrow's classes by building."""
+    import unicodedata
     from dateutil import parser as dtparser
-    
+
+    def _normalize_building_code(name: str) -> str:
+        """Normalize a building name to a simple ASCII key for comparison.
+
+        Strips diacritics (e.g. 'Barițiu' -> 'baritiu') and lowercases so that
+        building names from subject_parser (which includes Romanian diacritics)
+        compare correctly against the URL query param codes.
+        """
+        if not name:
+            return ''
+        nfkd = unicodedata.normalize('NFKD', name)
+        ascii_str = ''.join(c for c in nfkd if not unicodedata.combining(c))
+        return ascii_str.lower()
+
     # Add tools directory to path for imports
     tools_dir = pathlib.Path(__file__).parent / 'tools'
     if str(tools_dir) not in sys.path:
         sys.path.insert(0, str(tools_dir))
-    
+
     try:
         from event_parser import parse_location, parse_title, parse_event
     except ImportError:
@@ -3020,21 +3041,49 @@ def departures_view():
     # Get selected building from query params (default: show all)
     selected_building = request.args.get('building', '').lower()
     
-    # Load events — use the in-memory file cache to avoid opening the file
-    # on every request (prevents FD exhaustion under load).
+    # Load events — primary source is schedule_by_room.json (built from per-calendar
+    # events_*.json files). Fall back to the legacy events.json for any manually-added
+    # or old-pipeline events not yet covered by the schedule.
+    all_events = []
+
+    # 1. Load from schedule_by_room.json (the canonical aggregated schedule)
+    schedule_file = pathlib.Path('playwright_captures/schedule_by_room.json')
+    schedule_data = _read_json_cached(str(schedule_file))
+    if schedule_data and isinstance(schedule_data, dict):
+        for room, days in schedule_data.items():
+            for day, evs in days.items():
+                for e in evs:
+                    ec = dict(e)  # copy so we don't mutate cache
+                    # Inject the room key so building lookup can use it as fallback
+                    ec.setdefault('room', room)
+                    all_events.append(ec)
+
+    # 2. Also load calendar_map.json once for building fallback lookups
+    _cmap_departures = _read_json_cached(
+        str(pathlib.Path('playwright_captures') / 'calendar_map.json')
+    ) or {}
+
+    # 3. Supplement with legacy events.json (manually-added events, etc.)
     events_file = pathlib.Path('playwright_captures/events.json')
-    all_events = _read_json_cached(str(events_file))
-    if all_events is None:
-        return render_template('departures.html', 
-                             events_by_day={}, 
+    legacy_events = _read_json_cached(str(events_file))
+    if legacy_events and isinstance(legacy_events, list):
+        # Avoid duplicating events already loaded from schedule_by_room.json:
+        # use (title, start) as a dedup key.
+        sched_keys = set()
+        for ev in all_events:
+            sched_keys.add((str(ev.get('title', '')), str(ev.get('start') or '')))
+        for ev in legacy_events:
+            key = (str(ev.get('title', '')), str(ev.get('start') or ''))
+            if key not in sched_keys:
+                all_events.append(ev)
+
+    if not all_events:
+        return render_template('departures.html',
+                             events_by_day={},
                              buildings=BUILDINGS,
                              selected_building=selected_building,
                              current_time=datetime.now(),
-                             error="No events file found. Please go to Admin to import a calendar.")
-    
-    # Make a shallow copy so we can safely append extracurricular events below
-    # without mutating the cached list.
-    all_events = list(all_events)
+                             error="No events found. Please go to Admin to import a calendar.")
 
     # Deduplicate loaded events by ItemId or title+start to avoid duplicates showing in Live
     try:
@@ -3089,17 +3138,34 @@ def departures_view():
     now = datetime.now()
     today = now.date()
     tomorrow = today + timedelta(days=1)
-    
-    # Parse and filter events for today and tomorrow
-    events_today = defaultdict(list)
-    events_tomorrow = defaultdict(list)
+
+    # Build the set of dates to show on the board.
+    # Always include today and tomorrow, then also include the remaining days
+    # of the current week through Sunday so that weekend classes (common at
+    # UTCN extension campuses) are visible even when checked on a weekday.
+    # isoweekday(): Monday=1 … Sunday=7
+    days_until_sunday = 6 - today.isoweekday()  # 0 on Sunday already
+    # Show at minimum today+tomorrow; extend to Sunday (up to +6 days)
+    look_ahead = max(1, days_until_sunday)
+    shown_dates = {today + timedelta(days=i) for i in range(look_ahead + 1)}
+
+    def _day_label(d: date) -> str:
+        """Human-readable section label for a given date."""
+        if d == today:
+            return 'Astăzi'
+        if d == tomorrow:
+            return 'Mâine'
+        return d.strftime('%A, %d %b')  # e.g. "Saturday, 10 May"
+
+    # Per-date event buckets: date -> building_name -> [event_info]
+    events_by_date: dict = {d: defaultdict(list) for d in sorted(shown_dates)}
     has_today_events = False
-    
+
     for ev in all_events:
         start_str = ev.get('start')
         if not start_str:
             continue
-        
+
         try:
             start_dt = dtparser.parse(start_str)
             # If the parsed datetime is timezone-aware, convert to local timezone then drop tzinfo
@@ -3111,11 +3177,11 @@ def departures_view():
                     start_dt = start_dt.replace(tzinfo=None)
         except Exception:
             continue
-        
+
         event_date = start_dt.date()
-        
-        # Only today or tomorrow
-        if event_date not in (today, tomorrow):
+
+        # Only show dates in our look-ahead window
+        if event_date not in shown_dates:
             continue
         
         # Parse end time consistently and for today filter out events that already ended
@@ -3150,10 +3216,27 @@ def departures_view():
         # Parse location
         location = ev.get('location') or ''
         parsed_loc = parse_location(location)
-        building_name = parsed_loc.get('building', '') or 'Other'
-        building_code = building_name.lower() if building_name else 'other'
+        building_name = parsed_loc.get('building', '') or ''
         room = parsed_loc.get('room', '') or ''
-        
+
+        # Fallback: use building metadata from calendar_map.json via 'source' hash
+        # This handles events from schedule_by_room.json where location may be empty
+        # or where parse_location can't determine the building.
+        if not building_name:
+            src_hash = ev.get('source')
+            if src_hash and src_hash in _cmap_departures:
+                meta = _cmap_departures[src_hash]
+                building_name = meta.get('building') or ''
+                if not room:
+                    room = meta.get('room') or ''
+
+        # Also use the 'room' key injected from schedule_by_room.json as a last fallback
+        if not room:
+            room = ev.get('room') or ''
+
+        building_name = building_name or 'Other'
+        building_code = _normalize_building_code(building_name) if building_name else 'other'
+
         # Filter by building if selected
         if selected_building and building_code != selected_building:
             continue
@@ -3161,7 +3244,7 @@ def departures_view():
         # Parse title
         title = ev.get('title') or ''
         parsed_title = parse_title(title)
-        
+
         # Build event info
         event_info = {
             'start': start_dt,
@@ -3180,30 +3263,25 @@ def departures_view():
             'date': event_date,
             'color': ev.get('color') if isinstance(ev, dict) else None,
         }
-        
+
+        events_by_date[event_date][building_name].append(event_info)
         if event_date == today:
-            events_today[building_name].append(event_info)
             has_today_events = True
-        else:
-            events_tomorrow[building_name].append(event_info)
-    
-    # Sort events by start time within each building
-    for building in events_today:
-        events_today[building].sort(key=lambda x: x['start'])
-    for building in events_tomorrow:
-        events_tomorrow[building].sort(key=lambda x: x['start'])
-    
-    # Sort buildings alphabetically
-    events_today = dict(sorted(events_today.items()))
-    events_tomorrow = dict(sorted(events_tomorrow.items()))
-    
-    # Combine into structure for template
+
+    # Sort events within each building by start time; sort buildings alphabetically
+    for d in events_by_date:
+        for building in events_by_date[d]:
+            events_by_date[d][building].sort(key=lambda x: x['start'])
+        events_by_date[d] = dict(sorted(events_by_date[d].items()))
+
+    # Build the final events_by_day dict in chronological order.
+    # Only include dates that actually have events (skip empty look-ahead days).
     events_by_day = {}
-    if events_today:
-        events_by_day['Astăzi'] = events_today
-    if events_tomorrow:
-        events_by_day['Mâine'] = events_tomorrow
-    
+    for d in sorted(shown_dates):
+        day_data = events_by_date.get(d)
+        if day_data:
+            events_by_day[_day_label(d)] = dict(day_data)
+
     return render_template('departures.html',
                          events_by_day=events_by_day,
                          buildings=BUILDINGS,
@@ -4499,7 +4577,13 @@ def departures_json():
     
     today = date.today()
     tomorrow = today + timedelta(days=1)
-    
+
+    # Build look-ahead set: today through Sunday of current week (mirrors
+    # departures_view logic so weekend extension-campus classes are always shown).
+    days_until_sunday = 6 - today.isoweekday()
+    look_ahead = max(1, days_until_sunday)
+    shown_dates = {today + timedelta(days=i) for i in range(look_ahead + 1)}
+
     # Load events from schedule (use cached reads)
     events_file = pathlib.Path('playwright_captures/events.json')
     all_events = []
@@ -4567,7 +4651,7 @@ def departures_json():
     except Exception:
         pass
     
-    # Filter for today and tomorrow
+    # Filter for the look-ahead window (today through Sunday, to show weekend classes)
     filtered = []
     for ev in all_events:
         start_str = ev.get('start')
@@ -4576,7 +4660,7 @@ def departures_json():
         try:
             start_dt = dtparser.parse(start_str)
             event_date = start_dt.date()
-            if event_date in (today, tomorrow):
+            if event_date in shown_dates:
                 filtered.append(ev)
         except Exception:
             continue
@@ -4736,6 +4820,11 @@ def departures_json():
                         ev['professor'] = (parsed.get('professor') or ev.get('professor') or None)
                         ev['subject'] = (parsed.get('subject') or ev.get('subject') or ev.get('title'))
                         ev['display_title'] = (parsed.get('display_title') or ev.get('display_title') or ev.get('title'))
+                        # year/group extracted by parser from the raw title (e.g. "3rd year/30221")
+                        if parsed.get('year'):
+                            ev['year'] = parsed.get('year', '')
+                            ev['group'] = parsed.get('group', '')
+                            ev['group_display'] = parsed.get('group', '') or ''
                     except Exception:
                         # ignore parsing failure per-event
                         ev['room'] = ev.get('room') or ''
@@ -4744,27 +4833,28 @@ def departures_json():
                     ev['room'] = ev.get('room') or ''
                     ev['building'] = ev.get('building') or ''
 
-                # parse group/year
-                sample = ev.get('calendar_name') or ev.get('subject') or ev.get('title') or ''
-                if parse_group_from_string:
-                    try:
-                        grp = parse_group_from_string(sample)
-                        if grp and isinstance(grp, dict):
-                            ev['year'] = grp.get('year', '')
-                            ev['group'] = grp.get('group', '')
-                            ev['group_display'] = grp.get('display', '')
-                        else:
-                            ev['year'] = ''
-                            ev['group'] = ''
-                            ev['group_display'] = ''
-                    except Exception:
-                        ev['year'] = ''
-                        ev['group'] = ''
-                        ev['group_display'] = ''
-                else:
-                    ev['year'] = ev.get('year', '') or ''
-                    ev['group'] = ev.get('group', '') or ''
-                    ev['group_display'] = ev.get('group_display', '') or ''
+                # parse group/year — fallback to calendar name if parser didn't find it above
+                if not ev.get('year'):
+                    sample = ev.get('calendar_name') or ev.get('title') or ''
+                    if parse_group_from_string:
+                        try:
+                            grp = parse_group_from_string(sample)
+                            if grp and isinstance(grp, dict):
+                                ev['year'] = grp.get('year', '')
+                                ev['group'] = grp.get('group', '')
+                                ev['group_display'] = grp.get('display', '')
+                            else:
+                                ev.setdefault('year', '')
+                                ev.setdefault('group', '')
+                                ev.setdefault('group_display', '')
+                        except Exception:
+                            ev.setdefault('year', '')
+                            ev.setdefault('group', '')
+                            ev.setdefault('group_display', '')
+                    else:
+                        ev.setdefault('year', '')
+                        ev.setdefault('group', '')
+                        ev.setdefault('group_display', '')
             except Exception:
                 # tolerate per-event failures
                 ev['calendar_name'] = ev.get('calendar_name') if ev.get('calendar_name') is not None else None

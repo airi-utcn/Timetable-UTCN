@@ -63,6 +63,8 @@ class ParsedSubject:
     room_code: Optional[str] = None  # Codul sălii din titlu (ex: "479", "26B")
     event_type: Optional[str] = None  # "In-person", "Online", etc.
     is_practice: bool = False  # True dacă e laborator/seminar (conține "p" sau "seminar")
+    year: Optional[str] = None    # e.g. "3" from "3rd year"
+    group: Optional[str] = None   # e.g. "30221" from "2nd year/30221"
     display_title: str = ""  # Titlul formatat pentru afișare
     
     def __post_init__(self):
@@ -206,36 +208,17 @@ class SubjectParser:
             if not event_type:
                 event_type = paren_type
 
-        # Caz: "Artificial Intelligence (lecture) - 3rd Year - A. Groza"
+        # Caz: "Subject (lecture|exam|...) [rest with year/group/professor]"
+        # e.g. "Functional Programming (exam) 3rd year R. Slavescu"
+        #      "Artificial Intelligence (lecture) 3rd year, A. Groza"
+        #      "Algorithms (laboratory) 2nd year/30221 R. Potolea"
         desc_match = self.DESC_TITLE_PATTERN.match(title)
         if desc_match:
             name = desc_match.group('name').strip()
             kind = desc_match.group('kind').strip() if desc_match.group('kind') else None
             rest = (desc_match.group('rest') or '').strip()
-            professor = None
-            if rest:
-                # încearcă să extragă profesorul din segmentele despărțite de '-' sau din token-urile finale
-                segments = [s.strip() for s in re.split(r'[-–]', rest) if s.strip()] or [rest]
-                for seg in reversed(segments):
-                    if _looks_like_name(seg):
-                        professor = seg
-                        break
-                    toks = [t for t in seg.split() if t]
-                    # întâi încearcă perechi (ex: "R. Slavescu") pentru a păstra inițiala
-                    for i in range(len(toks)-1, 0, -1):
-                        pair = toks[i-1] + ' ' + toks[i]
-                        if _looks_like_name(pair):
-                            professor = pair
-                            break
-                    if professor:
-                        break
-                    # apoi verifică token-uri individuale
-                    for i in range(len(toks)-1, -1, -1):
-                        if _looks_like_name(toks[i]):
-                            professor = toks[i]
-                            break
-                    if professor:
-                        break
+
+            year, group, professor = self._extract_year_group_professor(rest)
 
             # Formatează numele materiei
             name = ' '.join(word.capitalize() for word in name.split())
@@ -244,14 +227,21 @@ class SubjectParser:
                 display += f" ({kind.capitalize()})"
             if professor:
                 display += f" - {professor}"
+            if year:
+                display += f" - Year {year}"
+            if group:
+                display += f" / {group}"
 
             return ParsedSubject(
                 original=original,
                 subject_name=name,
                 abbreviation=None,
                 professor=professor,
+                year=year,
+                group=group,
                 room_code=None,
                 event_type=kind or event_type,
+                is_practice=(kind or '').lower() in ('lab', 'laboratory', 'seminar'),
                 display_title=display
             )
 
@@ -439,8 +429,92 @@ class SubjectParser:
             display_title=display
         )
     
+    @staticmethod
+    def _extract_year_group_professor(rest: str) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+        """Extract (year, group, professor) from the trailing text after 'Subject (type)'.
+
+        Handles patterns like:
+            '3rd year R. Slavescu'
+            '3rd year, A. Groza'
+            '2nd year/30221 R. Potolea'
+            '- 3rd Year - A. Groza'
+        Returns a 3-tuple (year, group, professor), each possibly None.
+        """
+        if not rest:
+            return None, None, None
+
+        rest = rest.strip(' ,–-')
+
+        year: Optional[str] = None
+        group: Optional[str] = None
+
+        # --- year: ordinal (1st/2nd/3rd/4th year) or plain "year N" / "N year" ---
+        ordinal_pat = re.compile(
+            r'\b([1-4])(?:st|nd|rd|th)\s+year\b', re.IGNORECASE
+        )
+        m = ordinal_pat.search(rest)
+        if m:
+            year = m.group(1)
+        else:
+            m = re.search(r'\byear\s*([1-4])\b', rest, re.IGNORECASE)
+            if m:
+                year = m.group(1)
+
+        # --- group: "year/30221" or standalone 4-6 digit numeric code ---
+        year_group_pat = re.compile(
+            r'\b[1-4](?:st|nd|rd|th)\s+year\s*/\s*(\w+)\b', re.IGNORECASE
+        )
+        mg = year_group_pat.search(rest)
+        if mg:
+            group = mg.group(1)
+        else:
+            # standalone group code like "/30221" or "30221"
+            mg2 = re.search(r'(?:^|[\s,/])(\d{4,6})(?:\s|$)', rest)
+            if mg2:
+                group = mg2.group(1)
+
+        # --- remove year + group tokens from rest before looking for professor ---
+        clean = rest
+        # remove "Nth year/GROUP" or "Nth year"
+        clean = re.sub(
+            r'\b[1-4](?:st|nd|rd|th)\s+year(?:\s*/\s*\w+)?\b', '', clean,
+            flags=re.IGNORECASE
+        )
+        # remove plain "year N"
+        clean = re.sub(r'\byear\s*[1-4]\b', '', clean, flags=re.IGNORECASE)
+        # remove standalone group codes
+        if group:
+            clean = clean.replace(group, '')
+        clean = re.sub(r'[,/\-–]+', ' ', clean)
+        clean = re.sub(r'\s+', ' ', clean).strip()
+
+        # --- professor: scan right-to-left through segments and tokens ---
+        professor: Optional[str] = None
+        segments = [s.strip() for s in re.split(r'\s*[-–]\s*', clean) if s.strip()]
+        for seg in reversed(segments):
+            if _looks_like_name(seg):
+                professor = seg
+                break
+            toks = seg.split()
+            # try adjacent pairs first (e.g. "R. Slavescu")
+            for i in range(len(toks) - 1, 0, -1):
+                pair = toks[i - 1] + ' ' + toks[i]
+                if _looks_like_name(pair):
+                    professor = pair
+                    break
+            if professor:
+                break
+            # then individual tokens
+            for tok in reversed(toks):
+                if _looks_like_name(tok):
+                    professor = tok
+                    break
+            if professor:
+                break
+
+        return year, group, professor
+
     def expand_title(self, title: str) -> str:
-        """Expandează abrevierile din titlu și returnează versiunea curățată."""
         parsed = self.parse(title)
         return parsed.display_title
     

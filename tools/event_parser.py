@@ -85,6 +85,8 @@ class ParsedEvent:
     room_code: str = ''         # Codul complet al sălii (ex: "BT5.03")
     event_type: str = ''        # In-person, Online, etc
     is_lab: bool = False        # True dacă e laborator/seminar
+    year: str = ''              # Anul de studiu (e.g. "3" from "3rd year")
+    group: str = ''             # Grupa (e.g. "30221" from "2nd year/30221")
     display_title: str = ''     # Titlul formatat pentru afișare
     original_title: str = ''    # Titlul original
     original_location: str = '' # Locația originală
@@ -230,6 +232,8 @@ def parse_title(title: str) -> ParsedEvent:
                 room_code=parsed.room_code or '',
                 event_type=parsed.event_type or '',
                 is_lab=bool(getattr(parsed, 'is_practice', False) or (parsed.event_type or '').lower() in ('lab', 'laboratory', 'seminar')),
+                year=getattr(parsed, 'year', None) or '',
+                group=getattr(parsed, 'group', None) or '',
                 display_title=parsed.display_title or parsed.subject_name or (title or ''),
             )
         except Exception:
@@ -330,6 +334,8 @@ def parse_event(event: dict) -> dict:
     result['professor'] = parsed_title.professor
     result['event_type'] = parsed_title.event_type
     result['is_lab'] = parsed_title.is_lab
+    result['year'] = getattr(parsed_title, 'year', None) or ''
+    result['group'] = getattr(parsed_title, 'group', None) or ''
     result['display_title'] = parsed_title.display_title or parsed_title.subject
     
     # Parsează locația - încearcă mai multe surse
@@ -409,6 +415,10 @@ def parse_event(event: dict) -> dict:
         prof = result.get('professor') or ''
         prof = prof.strip()
 
+        # Base name (must be assigned BEFORE the professor-strip block below)
+        base = parsed_title.subject or parsed_title.abbreviation or (parsed_title.original_title or title)
+        base = base.strip()
+
         # If the base includes the professor (e.g. "Name, A. Groza" or "Name - A. Groza"), strip it
         if prof:
             # remove patterns like ", {prof}" or " - {prof}" (case-insensitive)
@@ -417,10 +427,6 @@ def parse_event(event: dict) -> dict:
                 if base.endswith(sp):
                     base = base[: -len(sp)].strip()
                     break
-
-        # Base name
-        base = parsed_title.subject or parsed_title.abbreviation or (parsed_title.original_title or title)
-        base = base.strip()
 
         # Final display title assembly
         if et == 'conference' or et == 'seminar':
@@ -453,33 +459,54 @@ def parse_group_from_string(s: str) -> Dict[str, str]:
     """Extract year and group from a free-form string (calendar name / subject).
 
     Returns dict: {'year': '3', 'group': 'A', 'display': 'Year 3 • Group A'} or empty strings.
+
+    Recognised patterns (in addition to legacy ones):
+        '3rd year R. Slavescu'    -> year=3
+        '2nd year/30221 R. Potolea' -> year=2, group=30221
+        '1st year, A. Groza'     -> year=1
     """
     out = {'year': '', 'group': '', 'display': ''}
     if not s:
         return out
     try:
         txt = str(s).lower()
-        # patterns: 'year 3', 'grupa A', 'group A', '3A', '3 A', 'eng 3', 'CTI A 3'
-        m = re.search(r'\byear\s*([1-4])\b', txt)
+
+        # --- ordinal year: 1st/2nd/3rd/4th year (possibly with /group) ---
+        m = re.search(r'\b([1-4])(?:st|nd|rd|th)\s+year\b', txt)
         if m:
             out['year'] = m.group(1)
+            # group attached via slash: "2nd year/30221"
+            mg = re.search(r'\b[1-4](?:st|nd|rd|th)\s+year\s*/\s*(\w+)\b', txt)
+            if mg and not out['group']:
+                out['group'] = mg.group(1).upper()
+
+        # --- plain "year N" ---
+        if not out['year']:
+            m = re.search(r'\byear\s*([1-4])\b', txt)
+            if m:
+                out['year'] = m.group(1)
+
+        # --- Romanian: "grupa A" / "group A" ---
         m = re.search(r'\bgrup[ai]\s*([a-z0-9]+)\b', txt)
         if m:
             out['group'] = m.group(1).upper()
         m = re.search(r'\bgroup\s*([a-z0-9]+)\b', txt)
         if m and not out['group']:
             out['group'] = m.group(1).upper()
+
         # tokens like '3A' or '3 A'
         if not out['year']:
             m = re.search(r'\b([1-4])\s*([a-z])\b', txt)
             if m:
                 out['year'] = m.group(1)
                 out['group'] = m.group(2).upper()
+
         # trailing single digit year
         if not out['year']:
             m = re.search(r'\b([1-4])\b(?!.*\d)', txt)
             if m:
                 out['year'] = m.group(1)
+
         # build display
         parts = []
         if out['year']:
