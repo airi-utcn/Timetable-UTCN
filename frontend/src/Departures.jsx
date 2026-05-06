@@ -276,6 +276,7 @@ export default function Departures() {
     return true
   })
 
+  // All today's events that haven't ended yet, sorted by start time
   const todayEvents = filteredEvents
     .filter(ev => {
       if (!ev.start || !ev.start.startsWith(today)) return false
@@ -290,28 +291,25 @@ export default function Departures() {
     .slice()
     .sort((a, b) => (a.start || '').localeCompare(b.start || ''))
 
-  // Split today into NOW (in-progress) and SOON (next upcoming slot)
+  // Slide 1: classes currently in progress
   const nowEvents = todayEvents.filter(ev => {
     const s = new Date(ev.start)
     const e = ev.end ? new Date(ev.end) : null
     return s <= now && (!e || e > now)
   })
 
+  // Slide 2: ALL remaining upcoming events today (not just next slot)
   const upcomingEvents = todayEvents.filter(ev => new Date(ev.start) > now)
-  // Find the earliest upcoming start time and take only that slot
-  const nextSlotTime = upcomingEvents.length > 0 ? upcomingEvents[0].start.slice(0, 16) : null
-  const soonEvents = nextSlotTime
-    ? upcomingEvents.filter(ev => ev.start.slice(0, 16) === nextSlotTime)
-    : []
 
-  // slides: 0 = NOW, 1 = SOON
+  // slides: 0 = NOW, 1 = UPCOMING TODAY
   const slides = [
-    { label: '▶ NOW IN PROGRESS', events: nowEvents, statusClass: 'status-active' },
-    { label: '⏱ STARTING SOON', events: soonEvents, statusClass: 'status-soon' },
+    { label: '▶ NOW IN PROGRESS', events: nowEvents },
+    { label: '⏱ UPCOMING TODAY',  events: upcomingEvents },
   ]
   const totalSlides = slides.length
-  const currentSlide = slides[slideIndex % totalSlides]
-  // Fall back to whichever slide has events if the primary is empty
+  const activeSlideIdx = slideIndex % totalSlides
+  const currentSlide = slides[activeSlideIdx]
+  // If the active slide is empty, show the other one instead (but keep the dot position)
   const displaySlide = currentSlide.events.length > 0
     ? currentSlide
     : slides.find(s => s.events.length > 0) || currentSlide
@@ -409,7 +407,7 @@ export default function Departures() {
                     title={s.label}
                     style={{
                       width: 10, height: 10, borderRadius: '50%', cursor: 'pointer', display: 'inline-block',
-                      background: i === slideIndex % totalSlides ? '#fff' : 'rgba(255,255,255,0.3)',
+                      background: i === activeSlideIdx ? '#fff' : 'rgba(255,255,255,0.3)',
                       border: '2px solid rgba(255,255,255,0.6)',
                       transition: 'background 0.2s',
                     }}
