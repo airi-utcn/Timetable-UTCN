@@ -276,76 +276,99 @@ export default function Departures() {
     return true
   })
 
-  const todayEvents = filteredEvents.filter(ev => {
-    if (!ev.start || !ev.start.startsWith(today)) return false
-    if (ev.end) {
-      const endTime = new Date(ev.end)
-      if (endTime < now) return false
-    }
-    return true
+  const todayEvents = filteredEvents
+    .filter(ev => {
+      if (!ev.start || !ev.start.startsWith(today)) return false
+      if (ev.end && new Date(ev.end) < now) return false
+      return true
+    })
+    .slice()
+    .sort((a, b) => (a.start || '').localeCompare(b.start || ''))
+
+  const tomorrowEvents = filteredEvents
+    .filter(ev => ev.start && ev.start.startsWith(tomorrow))
+    .slice()
+    .sort((a, b) => (a.start || '').localeCompare(b.start || ''))
+
+  // Split today into NOW (in-progress) and SOON (next upcoming slot)
+  const nowEvents = todayEvents.filter(ev => {
+    const s = new Date(ev.start)
+    const e = ev.end ? new Date(ev.end) : null
+    return s <= now && (!e || e > now)
   })
 
-  // ── Compute airport slides ──────────────────────────────────────────────
-  // Group today's events (not yet ended) by start-time slot (HH:MM).
-  // Slides order: running-now slots first, then upcoming slots in time order.
-  const buildSlides = (evts) => {
-    const groups = {}
-    evts.forEach(ev => {
-      const key = ev.start ? ev.start.slice(0, 16) : 'unknown'
-      if (!groups[key]) groups[key] = []
-      groups[key].push(ev)
-    })
-    const nowTs = new Date()
-    const entries = Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
-    const nowSlides = []
-    const upcomingSlides = []
-    entries.forEach(([key, slotEvts]) => {
-      const slotStart = new Date(key)
-      const isNow = slotEvts.some(ev => {
-        const s = new Date(ev.start)
-        const e = ev.end ? new Date(ev.end) : null
-        return s <= nowTs && (!e || e > nowTs)
-      })
-      const slide = { key, evts: slotEvts, isNow, slotStart }
-      if (isNow) nowSlides.push(slide)
-      else if (slotStart > nowTs) upcomingSlides.push(slide)
-    })
-    return [...nowSlides, ...upcomingSlides]
-  }
+  const upcomingEvents = todayEvents.filter(ev => new Date(ev.start) > now)
+  // Find the earliest upcoming start time and take only that slot
+  const nextSlotTime = upcomingEvents.length > 0 ? upcomingEvents[0].start.slice(0, 16) : null
+  const soonEvents = nextSlotTime
+    ? upcomingEvents.filter(ev => ev.start.slice(0, 16) === nextSlotTime)
+    : []
 
-  const slides = buildSlides(todayEvents)
+  // slides: 0 = NOW, 1 = SOON
+  const slides = [
+    { label: '▶ NOW IN PROGRESS', events: nowEvents, statusClass: 'status-active' },
+    { label: '⏱ STARTING SOON', events: soonEvents, statusClass: 'status-soon' },
+  ]
   const totalSlides = slides.length
-  const currentSlide = totalSlides > 0 ? slides[slideIndex % totalSlides] : null
+  const currentSlide = slides[slideIndex % totalSlides]
+  // Fall back to whichever slide has events if the primary is empty
+  const displaySlide = currentSlide.events.length > 0
+    ? currentSlide
+    : slides.find(s => s.events.length > 0) || currentSlide
 
   const formatTime = (isoString) => {
     if (!isoString) return '--:--'
     try {
       return new Date(isoString).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-    } catch (e) {
-      return '--:--'
-    }
+    } catch (e) { return '--:--' }
   }
 
-  const getStatusText = (ev) => {
-    if (!ev.start) return ''
+  const getTimeStatus = (ev) => {
+    if (!ev.start) return { text: '', className: '' }
     try {
       const n = new Date()
       const s = new Date(ev.start)
       const e = ev.end ? new Date(ev.end) : null
-      if (s <= n && (!e || e > n)) return 'NOW'
+      if (e && n > e) return { text: 'Finished', className: 'status-finished' }
+      if (n >= s) return { text: 'In progress', className: 'status-active' }
       const diff = s - n
       const mins = Math.floor(diff / 60000)
-      if (mins < 60) return 'in ' + mins + 'm'
-      return 'in ' + Math.floor(mins / 60) + 'h' + (mins % 60 ? ' ' + (mins % 60) + 'm' : '')
-    } catch { return '' }
+      if (mins < 15) return { text: 'in ' + mins + ' min', className: 'status-soon' }
+      if (mins < 60) return { text: 'in ' + mins + ' min', className: 'status-upcoming' }
+      const hours = Math.floor(mins / 60)
+      return { text: 'in ' + hours + 'h ' + (mins % 60) + 'm', className: '' }
+    } catch (e) { return { text: '', className: '' } }
   }
 
-  // Slide label shown in the header strip
-  const slideLabel = currentSlide
-    ? (currentSlide.isNow
-        ? '▶ NOW IN PROGRESS'
-        : '⏱ NEXT: ' + formatTime(currentSlide.key + ':00'))
-    : null
+  const BoardRows = ({ evts }) => (
+    <>
+      {evts.map((ev, idx) => {
+        const status = getTimeStatus(ev)
+        return (
+          <div key={idx} className={'board-row ' + status.className}
+            style={{ borderLeftColor: ev.color || '#003366' }}>
+            <span className="col-time" data-label="Time">
+              {formatTime(ev.start)}
+              <small>{formatTime(ev.end)}</small>
+            </span>
+            <span className="col-event" data-label="Event">
+              <span className="event-title">{ev.display_title || ev.title}</span>
+              <span className="event-meta">{ev.calendar_name || ev.subject || ''}</span>
+            </span>
+            <span className="col-prof" data-label="Professor">{ev.professor || '-'}</span>
+            <span className="col-room" data-label="Room">{ev.room || parseRoomFromLocation(ev.location) || '-'}</span>
+            <span className="col-group" data-label="Group/Year">
+              {ev.group_display || parseGroupFromString(
+                (calendarsMap[ev.source] && calendarsMap[ev.source].name) ||
+                ev.calendar_name || ev.subject || ev.title
+              ) || '-'}
+            </span>
+            <span className={'col-status ' + status.className} data-label="Status">{status.text}</span>
+          </div>
+        )
+      })}
+    </>
+  )
 
   return (
     <div className="departures-container">
@@ -371,112 +394,71 @@ export default function Departures() {
       {loading && <div className="loading-state"><div className="spinner"></div><p>Loading...</p></div>}
 
       {!loading && !error && (
-        <div className="airport-board-wrap">
-          {/* Slide header strip */}
-          {totalSlides > 0 && (
-            <div className="airport-slide-header">
-              <span className={'airport-slide-label' + (currentSlide && currentSlide.isNow ? ' label-now' : ' label-next')}>
-                {slideLabel}
-              </span>
-              <div className="airport-slide-dots">
+        <div className="departures-grid">
+          {/* TODAY — sliding between NOW and SOON */}
+          <div className="departure-section">
+            <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3 style={{ opacity: slideVisible ? 1 : 0, transition: 'opacity 0.4s' }}>
+                {displaySlide.label}
+              </h3>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
                 {slides.map((s, i) => (
                   <span
                     key={i}
-                    className={'airport-dot' + (i === slideIndex % totalSlides ? ' active' : '') + (s.isNow ? ' dot-now' : '')}
                     onClick={() => { setSlideIndex(i); slideIndexRef.current = i }}
-                    title={s.isNow ? 'Now' : formatTime(s.key + ':00')}
+                    title={s.label}
+                    style={{
+                      width: 10, height: 10, borderRadius: '50%', cursor: 'pointer', display: 'inline-block',
+                      background: i === slideIndex % totalSlides ? '#fff' : 'rgba(255,255,255,0.3)',
+                      border: '2px solid rgba(255,255,255,0.6)',
+                      transition: 'background 0.2s',
+                    }}
                   />
                 ))}
+                <span style={{ fontSize: '0.75rem', opacity: 0.7, marginLeft: 4 }}>
+                  {todayEvents.length} total today
+                </span>
               </div>
-              <span className="airport-slide-counter">{(slideIndex % totalSlides) + 1} / {totalSlides}</span>
             </div>
-          )}
-
-          {/* Main airport board */}
-          <div className={'airport-board' + (slideVisible ? ' slide-visible' : ' slide-hidden')}>
-            {totalSlides === 0 ? (
-              <div className="no-events" style={{ padding: '60px 20px', textAlign: 'center' }}>
-                <p>No classes scheduled for today.</p>
+            <div className="departure-board" style={{ opacity: slideVisible ? 1 : 0, transition: 'opacity 0.4s' }}>
+              <div className="board-header">
+                <span className="col-time">Time</span>
+                <span className="col-event">Event</span>
+                <span className="col-prof">Professor</span>
+                <span className="col-room">Room</span>
+                <span className="col-group">Group/Year</span>
+                <span className="col-status">Status</span>
               </div>
-            ) : (
-              <>
-                <div className="airport-board-header">
-                  <span className="ap-col-time">TIME</span>
-                  <span className="ap-col-room">ROOM</span>
-                  <span className="ap-col-subject">SUBJECT</span>
-                  <span className="ap-col-prof">PROFESSOR</span>
-                  <span className="ap-col-group">YEAR / GROUP</span>
-                  <span className="ap-col-status">STATUS</span>
-                </div>
-                {(currentSlide ? currentSlide.evts : [])
-                  .slice()
-                  .sort((a, b) => (a.room || '').localeCompare(b.room || ''))
-                  .map((ev, idx) => {
-                    const statusText = getStatusText(ev)
-                    const isNowRow = statusText === 'NOW'
-                    return (
-                      <div key={idx} className={'airport-board-row' + (isNowRow ? ' row-now' : '')}
-                        style={{ borderLeftColor: ev.color || '#0066cc' }}>
-                        <span className="ap-col-time">
-                          {formatTime(ev.start)}
-                          {ev.end && <small>–{formatTime(ev.end)}</small>}
-                        </span>
-                        <span className="ap-col-room">{ev.room || parseRoomFromLocation(ev.location) || '–'}</span>
-                        <span className="ap-col-subject">{ev.display_title || ev.title || '–'}</span>
-                        <span className="ap-col-prof">{ev.professor || '–'}</span>
-                        <span className="ap-col-group">
-                          {ev.group_display ||
-                            parseGroupFromString(
-                              (calendarsMap[ev.source] && calendarsMap[ev.source].name) ||
-                              ev.calendar_name || ev.subject || ev.title
-                            ) || '–'}
-                        </span>
-                        <span className={'ap-col-status' + (isNowRow ? ' status-now' : '')}>{statusText}</span>
-                      </div>
-                    )
-                  })}
-              </>
-            )}
+              {displaySlide.events.length === 0 ? (
+                <div className="no-events">No events in this slot</div>
+              ) : (
+                <BoardRows evts={displaySlide.events} />
+              )}
+            </div>
           </div>
 
-          {/* Tomorrow strip — compact, non-rotating */}
-          {filteredEvents.filter(ev => ev.start && ev.start.startsWith(tomorrow)).length > 0 && (
-            <details className="tomorrow-strip">
-              <summary>Tomorrow ({tomorrow}) — {filteredEvents.filter(ev => ev.start && ev.start.startsWith(tomorrow)).length} events</summary>
-              <div className="airport-board" style={{ marginTop: 0 }}>
-                <div className="airport-board-header">
-                  <span className="ap-col-time">TIME</span>
-                  <span className="ap-col-room">ROOM</span>
-                  <span className="ap-col-subject">SUBJECT</span>
-                  <span className="ap-col-prof">PROFESSOR</span>
-                  <span className="ap-col-group">YEAR / GROUP</span>
-                  <span className="ap-col-status"></span>
-                </div>
-                {filteredEvents
-                  .filter(ev => ev.start && ev.start.startsWith(tomorrow))
-                  .slice()
-                  .sort((a, b) => (a.start || '').localeCompare(b.start || ''))
-                  .slice(0, 30)
-                  .map((ev, idx) => (
-                    <div key={idx} className="airport-board-row"
-                      style={{ borderLeftColor: ev.color || '#0066cc' }}>
-                      <span className="ap-col-time">{formatTime(ev.start)}{ev.end && <small>–{formatTime(ev.end)}</small>}</span>
-                      <span className="ap-col-room">{ev.room || parseRoomFromLocation(ev.location) || '–'}</span>
-                      <span className="ap-col-subject">{ev.display_title || ev.title || '–'}</span>
-                      <span className="ap-col-prof">{ev.professor || '–'}</span>
-                      <span className="ap-col-group">
-                        {ev.group_display ||
-                          parseGroupFromString(
-                            (calendarsMap[ev.source] && calendarsMap[ev.source].name) ||
-                            ev.calendar_name || ev.subject || ev.title
-                          ) || '–'}
-                      </span>
-                      <span className="ap-col-status"></span>
-                    </div>
-                  ))}
+          {/* TOMORROW — always visible, no rotation */}
+          <div className="departure-section">
+            <div className="section-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <h3>Tomorrow ({tomorrow})</h3>
+              <span className="event-count">{tomorrowEvents.length} events</span>
+            </div>
+            <div className="departure-board">
+              <div className="board-header">
+                <span className="col-time">Time</span>
+                <span className="col-event">Event</span>
+                <span className="col-prof">Professor</span>
+                <span className="col-room">Room</span>
+                <span className="col-group">Group/Year</span>
+                <span className="col-status">Status</span>
               </div>
-            </details>
-          )}
+              {tomorrowEvents.length === 0 ? (
+                <div className="no-events">No scheduled events</div>
+              ) : (
+                <BoardRows evts={tomorrowEvents.slice(0, 20)} />
+              )}
+            </div>
+          </div>
         </div>
       )}
 
