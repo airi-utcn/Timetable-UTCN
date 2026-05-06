@@ -1,18 +1,19 @@
-import React, { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback, useRef } from 'react'
 
 export default function Departures() {
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [selectedBuilding, setSelectedBuilding] = useState('')
-  // Year/Group filtering removed for Live board per request
   const [buildings, setBuildings] = useState([])
   const [calendarsMap, setCalendarsMap] = useState({})
   const [lastUpdate, setLastUpdate] = useState(null)
 
-  // Stage controls which subset of today's events to show on the Live board.
-  // 'now' = show in-progress events (or fallback few), 'upcoming' = show upcoming ones.
-  const [stage, setStage] = useState('now')
+  // Airport rotating board: index into the computed slides array
+  const [slideIndex, setSlideIndex] = useState(0)
+  // Trigger CSS fade-in on each slide change
+  const [slideVisible, setSlideVisible] = useState(true)
+  const slideIndexRef = useRef(0)
 
   // UTCN Buildings
   const BUILDING_NAMES = {
@@ -27,8 +28,8 @@ export default function Departures() {
     'OBSERVATOR ELECTRO CLUJ': 'OBSERVATOR ELECTRO CLUJ',
     '21 DECEMBRIE INSTALATII CLUJ': '21 DECEMBRIE INSTALATII CLUJ',
     'MUNCII CLUJ': 'MUNCII CLUJ',
-    'CUNBM VICTORIEI': 'CUNBM VICTORIEI',
-    'CUNBM BABES': 'CUNBM BABES',
+    'CUNBM VICTORIEI': 'CUNBM VICTORIEI (Baia Mare)',
+    'CUNBM BABES': 'CUNBM BABES (Baia Mare)',
     'UTCN AIRI': 'UTCN AIRI',
   }
 
@@ -233,20 +234,25 @@ export default function Departures() {
 
   useEffect(() => {
     fetchDepartures()
-    // Refresh data every 5 minutes to keep the live board up-to-date
     const interval = setInterval(fetchDepartures, 300000)
     return () => clearInterval(interval)
   }, [fetchDepartures])
 
-  // Toggle the display stage every 5 seconds: now <-> upcoming (reduced from 10s)
+  // Airport board: advance to next slide every 10 seconds with a fade transition
   useEffect(() => {
     const t = setInterval(() => {
-      setStage((s) => (s === 'now' ? 'upcoming' : 'now'))
-    }, 5000)
+      setSlideVisible(false)
+      setTimeout(() => {
+        setSlideIndex(prev => {
+          const next = prev + 1
+          slideIndexRef.current = next
+          return next
+        })
+        setSlideVisible(true)
+      }, 400)
+    }, 10000)
     return () => clearInterval(t)
   }, [])
-
-  // (Cycling behavior removed — restoring previous stable behavior per user request)
 
   // Refresh live board on midnight so 'Today' / 'Tomorrow' sections update
   useEffect(() => {
@@ -263,10 +269,6 @@ export default function Departures() {
 
   const filteredEvents = events.filter(ev => {
     if (selectedBuilding) {
-      // Use normalized building for comparison so raw DB values and inferred
-      // values match the canonical list used in the dropdown. Consider both
-      // location and room fields when normalizing so 'BT' in room names is
-      // detected.
       const combinedLoc = ((ev.location || '') + ' ' + (ev.room || '')).trim()
       const evBuilding = normalizeBuilding(ev.building, combinedLoc)
       if (evBuilding !== selectedBuilding) return false
@@ -276,119 +278,80 @@ export default function Departures() {
 
   const todayEvents = filteredEvents.filter(ev => {
     if (!ev.start || !ev.start.startsWith(today)) return false
-    // For live board, exclude events that have already ended
     if (ev.end) {
       const endTime = new Date(ev.end)
-      if (endTime < new Date()) return false
+      if (endTime < now) return false
     }
     return true
   })
-  const tomorrowEvents = filteredEvents.filter(ev => ev.start && ev.start.startsWith(tomorrow))
+
+  // ── Compute airport slides ──────────────────────────────────────────────
+  // Group today's events (not yet ended) by start-time slot (HH:MM).
+  // Slides order: running-now slots first, then upcoming slots in time order.
+  const buildSlides = (evts) => {
+    const groups = {}
+    evts.forEach(ev => {
+      const key = ev.start ? ev.start.slice(0, 16) : 'unknown'
+      if (!groups[key]) groups[key] = []
+      groups[key].push(ev)
+    })
+    const nowTs = new Date()
+    const entries = Object.entries(groups).sort(([a], [b]) => a.localeCompare(b))
+    const nowSlides = []
+    const upcomingSlides = []
+    entries.forEach(([key, slotEvts]) => {
+      const slotStart = new Date(key)
+      const isNow = slotEvts.some(ev => {
+        const s = new Date(ev.start)
+        const e = ev.end ? new Date(ev.end) : null
+        return s <= nowTs && (!e || e > nowTs)
+      })
+      const slide = { key, evts: slotEvts, isNow, slotStart }
+      if (isNow) nowSlides.push(slide)
+      else if (slotStart > nowTs) upcomingSlides.push(slide)
+    })
+    return [...nowSlides, ...upcomingSlides]
+  }
+
+  const slides = buildSlides(todayEvents)
+  const totalSlides = slides.length
+  const currentSlide = totalSlides > 0 ? slides[slideIndex % totalSlides] : null
 
   const formatTime = (isoString) => {
     if (!isoString) return '--:--'
     try {
-      return new Date(isoString).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+      return new Date(isoString).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
     } catch (e) {
       return '--:--'
     }
   }
 
-  const getTimeStatus = (ev) => {
-    if (!ev.start) return { text: '', className: '' }
+  const getStatusText = (ev) => {
+    if (!ev.start) return ''
     try {
-      const now = new Date()
-      const startTime = new Date(ev.start)
-      const endTime = ev.end ? new Date(ev.end) : null
-      
-      // If we have end time and current time is past end time, shouldn't happen due to filtering
-      if (endTime && now > endTime) {
-        return { text: 'Finished', className: 'status-finished' }
-      }
-      
-      // If current time is past start time, it's in progress
-      if (now >= startTime) {
-        return { text: 'In progress', className: 'status-active' }
-      }
-      
-      // Calculate time until start
-      const diff = startTime - now
+      const n = new Date()
+      const s = new Date(ev.start)
+      const e = ev.end ? new Date(ev.end) : null
+      if (s <= n && (!e || e > n)) return 'NOW'
+      const diff = s - n
       const mins = Math.floor(diff / 60000)
-      if (mins < 15) return { text: 'in ' + mins + ' min', className: 'status-soon' }
-      if (mins < 60) return { text: 'in ' + mins + ' min', className: 'status-upcoming' }
-      const hours = Math.floor(mins / 60)
-      return { text: 'in ' + hours + 'h ' + (mins % 60) + 'm', className: '' }
-    } catch (e) {
-      return { text: '', className: '' }
-    }
+      if (mins < 60) return 'in ' + mins + 'm'
+      return 'in ' + Math.floor(mins / 60) + 'h' + (mins % 60 ? ' ' + (mins % 60) + 'm' : '')
+    } catch { return '' }
   }
 
-  const DepartureBoard = ({ events: evts, title, isToday }) => {
-    // Work on a sorted copy to avoid mutating props
-    const sorted = (evts || []).slice().sort((a, b) => (a.start || '').localeCompare(b.start || ''))
-
-    // Decide which events to display depending on the current stage
-    let displayList = sorted
-    if (isToday) {
-      if (stage === 'now') {
-        const nowList = sorted.filter(ev => getTimeStatus(ev).className === 'status-active')
-        if (nowList.length > 0) displayList = nowList
-        else displayList = sorted.slice(0, Math.min(4, sorted.length))
-      } else {
-        // upcoming stage: show first few upcoming (non-active)
-        const upcoming = sorted.filter(ev => getTimeStatus(ev).className !== 'status-active')
-        displayList = upcoming.slice(0, Math.min(6, upcoming.length))
-      }
-    } else {
-      displayList = sorted.slice(0, 20)
-    }
-
-    return (
-      <div className="departure-section">
-        <div className="section-header">
-          <h3>{title}</h3>
-          <span className="event-count">{(evts || []).length} events</span>
-        </div>
-        {displayList.length === 0 ? (
-          <div className="no-events">No scheduled events</div>
-        ) : (
-          <div className="departure-board">
-            <div className="board-header">
-              <span className="col-time">Time</span>
-              <span className="col-event">Event</span>
-              <span className="col-prof">Professor</span>
-              <span className="col-room">Room</span>
-              <span className="col-group">Group/Year</span>
-              <span className="col-status">Status</span>
-            </div>
-            {displayList.map((ev, idx) => {
-              const status = isToday ? getTimeStatus(ev) : { text: '', className: '' }
-              return (
-                <div key={idx} className={'board-row ' + status.className} style={{ borderLeftColor: ev.color || '#003366' }}>
-                  <span className="col-time" data-label="Time">{formatTime(ev.start)}<small>{formatTime(ev.end)}</small></span>
-                  <span className="col-event" data-label="Event">
-                    <span className="event-title">{ev.display_title || ev.title}</span>
-                    <span className="event-meta">{ev.calendar_name || ev.subject || ''}</span>
-                  </span>
-                  <span className="col-prof" data-label="Professor">{ev.professor || '-'}</span>
-                  <span className="col-room" data-label="Room">{ev.room || parseRoomFromLocation(ev.location) || '-'}</span>
-                  <span className="col-group" data-label="Group/Year">{ev.group_display || parseGroupFromString((calendarsMap[ev.source] && (calendarsMap[ev.source].name)) || ev.calendar_name || ev.subject || ev.title) || '-'}</span>
-                  <span className={'col-status ' + status.className} data-label="Status">{status.text}</span>
-                </div>
-              )
-            })}
-          </div>
-        )}
-      </div>
-    )
-  }
+  // Slide label shown in the header strip
+  const slideLabel = currentSlide
+    ? (currentSlide.isNow
+        ? '▶ NOW IN PROGRESS'
+        : '⏱ NEXT: ' + formatTime(currentSlide.key + ':00'))
+    : null
 
   return (
     <div className="departures-container">
       <div className="toolbar">
         <div className="toolbar-left"><h2>Live Board</h2></div>
         <div className="toolbar-right">
-            {/* Year/Group filters removed from Live board */}
           <div className="filter-group">
             <label>Building:</label>
             <select value={selectedBuilding} onChange={(e) => setSelectedBuilding(e.target.value)}>
@@ -408,15 +371,118 @@ export default function Departures() {
       {loading && <div className="loading-state"><div className="spinner"></div><p>Loading...</p></div>}
 
       {!loading && !error && (
-        <div className="departures-grid">
-          <DepartureBoard events={todayEvents} title={'Today (' + today + ')'} isToday={true} />
-          <DepartureBoard events={tomorrowEvents} title={'Tomorrow (' + tomorrow + ')'} isToday={false} />
+        <div className="airport-board-wrap">
+          {/* Slide header strip */}
+          {totalSlides > 0 && (
+            <div className="airport-slide-header">
+              <span className={'airport-slide-label' + (currentSlide && currentSlide.isNow ? ' label-now' : ' label-next')}>
+                {slideLabel}
+              </span>
+              <div className="airport-slide-dots">
+                {slides.map((s, i) => (
+                  <span
+                    key={i}
+                    className={'airport-dot' + (i === slideIndex % totalSlides ? ' active' : '') + (s.isNow ? ' dot-now' : '')}
+                    onClick={() => { setSlideIndex(i); slideIndexRef.current = i }}
+                    title={s.isNow ? 'Now' : formatTime(s.key + ':00')}
+                  />
+                ))}
+              </div>
+              <span className="airport-slide-counter">{(slideIndex % totalSlides) + 1} / {totalSlides}</span>
+            </div>
+          )}
+
+          {/* Main airport board */}
+          <div className={'airport-board' + (slideVisible ? ' slide-visible' : ' slide-hidden')}>
+            {totalSlides === 0 ? (
+              <div className="no-events" style={{ padding: '60px 20px', textAlign: 'center' }}>
+                <p>No classes scheduled for today.</p>
+              </div>
+            ) : (
+              <>
+                <div className="airport-board-header">
+                  <span className="ap-col-time">TIME</span>
+                  <span className="ap-col-room">ROOM</span>
+                  <span className="ap-col-subject">SUBJECT</span>
+                  <span className="ap-col-prof">PROFESSOR</span>
+                  <span className="ap-col-group">YEAR / GROUP</span>
+                  <span className="ap-col-status">STATUS</span>
+                </div>
+                {(currentSlide ? currentSlide.evts : [])
+                  .slice()
+                  .sort((a, b) => (a.room || '').localeCompare(b.room || ''))
+                  .map((ev, idx) => {
+                    const statusText = getStatusText(ev)
+                    const isNowRow = statusText === 'NOW'
+                    return (
+                      <div key={idx} className={'airport-board-row' + (isNowRow ? ' row-now' : '')}
+                        style={{ borderLeftColor: ev.color || '#0066cc' }}>
+                        <span className="ap-col-time">
+                          {formatTime(ev.start)}
+                          {ev.end && <small>–{formatTime(ev.end)}</small>}
+                        </span>
+                        <span className="ap-col-room">{ev.room || parseRoomFromLocation(ev.location) || '–'}</span>
+                        <span className="ap-col-subject">{ev.display_title || ev.title || '–'}</span>
+                        <span className="ap-col-prof">{ev.professor || '–'}</span>
+                        <span className="ap-col-group">
+                          {ev.group_display ||
+                            parseGroupFromString(
+                              (calendarsMap[ev.source] && calendarsMap[ev.source].name) ||
+                              ev.calendar_name || ev.subject || ev.title
+                            ) || '–'}
+                        </span>
+                        <span className={'ap-col-status' + (isNowRow ? ' status-now' : '')}>{statusText}</span>
+                      </div>
+                    )
+                  })}
+              </>
+            )}
+          </div>
+
+          {/* Tomorrow strip — compact, non-rotating */}
+          {filteredEvents.filter(ev => ev.start && ev.start.startsWith(tomorrow)).length > 0 && (
+            <details className="tomorrow-strip">
+              <summary>Tomorrow ({tomorrow}) — {filteredEvents.filter(ev => ev.start && ev.start.startsWith(tomorrow)).length} events</summary>
+              <div className="airport-board" style={{ marginTop: 0 }}>
+                <div className="airport-board-header">
+                  <span className="ap-col-time">TIME</span>
+                  <span className="ap-col-room">ROOM</span>
+                  <span className="ap-col-subject">SUBJECT</span>
+                  <span className="ap-col-prof">PROFESSOR</span>
+                  <span className="ap-col-group">YEAR / GROUP</span>
+                  <span className="ap-col-status"></span>
+                </div>
+                {filteredEvents
+                  .filter(ev => ev.start && ev.start.startsWith(tomorrow))
+                  .slice()
+                  .sort((a, b) => (a.start || '').localeCompare(b.start || ''))
+                  .slice(0, 30)
+                  .map((ev, idx) => (
+                    <div key={idx} className="airport-board-row"
+                      style={{ borderLeftColor: ev.color || '#0066cc' }}>
+                      <span className="ap-col-time">{formatTime(ev.start)}{ev.end && <small>–{formatTime(ev.end)}</small>}</span>
+                      <span className="ap-col-room">{ev.room || parseRoomFromLocation(ev.location) || '–'}</span>
+                      <span className="ap-col-subject">{ev.display_title || ev.title || '–'}</span>
+                      <span className="ap-col-prof">{ev.professor || '–'}</span>
+                      <span className="ap-col-group">
+                        {ev.group_display ||
+                          parseGroupFromString(
+                            (calendarsMap[ev.source] && calendarsMap[ev.source].name) ||
+                            ev.calendar_name || ev.subject || ev.title
+                          ) || '–'}
+                      </span>
+                      <span className="ap-col-status"></span>
+                    </div>
+                  ))}
+              </div>
+            </details>
+          )}
         </div>
       )}
 
       {lastUpdate && (
         <div className="status-bar">
-          <span>Last update: {lastUpdate.toLocaleTimeString('en-US')}</span>
+          <span>Last update: {lastUpdate.toLocaleTimeString('en-GB')}</span>
         </div>
       )}
     </div>
