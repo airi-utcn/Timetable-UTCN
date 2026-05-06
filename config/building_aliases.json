@@ -6,11 +6,34 @@
   "bari": "Baritiu",
   "daic": "DAIC",
   "utcn daic": "DAIC",
+  "daicoviciu": "DAIC",
   "doroban": "Dorobantilor",
   "dorobantilor": "Dorobantilor",
   "observator": "Observatorului",
   "observatorului": "Observatorului",
   "memorandum": "Memorandumului",
   "memorandumului": "Memorandumului",
-  "mem": "Memorandumului"
+  "mem": "Memorandumului",
+
+  "ext ab": "Alba Iulia",
+  "ext sm": "Satu Mare",
+  "ext bn": "Bistrita",
+  "ext zal": "Zalau",
+
+  "cunbm": "Bistrita",
+
+  "etti": "ETTI",
+  "ie ": "IE",
+  "ie b": "IE",
+  "imm": "IMM",
+  "iirmp": "IIRMP",
+  "armm": "ARMM",
+  "insta": "INSTA",
+  "cons": "CONS",
+  "hub ut": "HUB UT",
+  "hub": "HUB UT",
+  "rectorat": "Rectorat",
+  "aula centenar": "Aula Centenar",
+  "aula domsa": "Aula Domsa",
+  "aula utcn hub": "HUB UT"
 }

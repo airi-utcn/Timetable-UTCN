@@ -591,13 +591,53 @@ class ParsedLocation:
     display_name: str = ""  # "Dorobanților - Sala 107"
 
 
-# Mapping pentru codurile clădirilor
+# Mapping pentru codurile clădirilor (baza hardcodată + extensii din config)
 BUILDING_CODES = {
+    # Main Cluj-Napoca campuses
     "bar": "Barițiu",
-    "doro": "Dorobanților", 
+    "baritiu": "Barițiu",
+    "doro": "Dorobanților",
+    "dorobantilor": "Dorobanților",
     "daic": "Daicoviciu",
+    "daicoviciu": "Daicoviciu",
     "obs": "Observatorului",
+    "observatorului": "Observatorului",
+    "memorandum": "Memorandumului",
+    "memorandumului": "Memorandumului",
+    # Faculties / buildings
+    "etti": "ETTI",
+    "imm": "IMM",
+    "iirmp": "IIRMP",
+    "armm": "ARMM",
+    "insta": "INSTA",
+    "cons": "CONS",
+    "ie": "IE",
+    "hub ut": "HUB UT",
+    "hub": "HUB UT",
+    "rectorat": "Rectorat",
+    "aula centenar": "Aula Centenar",
+    "aula domsa": "Aula Domsa",
+    "aula utcn hub": "HUB UT",
+    # Extension campuses
+    "ext ab": "Alba Iulia",
+    "ext sm": "Satu Mare",
+    "ext bn": "Bistrita",
+    "ext zal": "Zalau",
+    "cunbm": "Bistrita",
 }
+
+# Load extra aliases from config/building_aliases.json if present
+try:
+    import json as _json
+    import pathlib as _pathlib
+    _cfg_path = _pathlib.Path(__file__).resolve().parent.parent / 'config' / 'building_aliases.json'
+    if _cfg_path.exists():
+        _user_map = _json.loads(_cfg_path.read_text(encoding='utf-8'))
+        for _k, _v in _user_map.items():
+            if _k and _v and isinstance(_k, str) and isinstance(_v, str):
+                BUILDING_CODES[_k.lower()] = _v
+except Exception:
+    pass
 
 
 def parse_location(location: str) -> ParsedLocation:
@@ -629,27 +669,43 @@ def parse_location(location: str) -> ParsedLocation:
         room = match.group(2).upper()
         building_name = BUILDING_CODES.get(building_code, building_code.upper())
     else:
-        # Pattern 2: UTCN - AC Bar - Sala XXX
-        match = re.match(
-            r'UTCN\s*-\s*AC\s+(\w+)\s*-\s*Sala\s+(.+)',
+        # Pattern 2: UTCN - FACULTYCODE [Address] - Sala XXX
+        # Try to match the faculty code token(s) right after "UTCN -"
+        # This handles: "UTCN - ETTI Observatorului 2 - Sala 402"
+        #               "UTCN - EXT AB Al. I. Cuza 23 - Sala A2"
+        #               "UTCN - AC Bar - Sala BT 503"
+        match2 = re.match(
+            r'UTCN\s*-\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)\b',
             loc, re.IGNORECASE
         )
-        if match:
-            building_code = match.group(1).lower()
-            room = match.group(2).strip().upper()
-            building_name = BUILDING_CODES.get(building_code, building_code.upper())
-        else:
-            # Pattern 3: încearcă să găsească orice cod de clădire
-            for code in BUILDING_CODES:
-                if code in loc.lower():
+        if match2:
+            raw_code = match2.group(1).strip().lower()
+            # Try the 2-word code first, then 1-word
+            words = raw_code.split()
+            two_word = ' '.join(words[:2]) if len(words) >= 2 else None
+            one_word = words[0] if words else None
+            if two_word and two_word in BUILDING_CODES:
+                building_code = two_word
+                building_name = BUILDING_CODES[two_word]
+            elif one_word and one_word in BUILDING_CODES:
+                building_code = one_word
+                building_name = BUILDING_CODES[one_word]
+
+        if not building_name:
+            # Pattern 3: fallback substring search (sorted longest first)
+            loc_lower = loc.lower()
+            for code in sorted(BUILDING_CODES, key=lambda s: -len(s)):
+                if code in loc_lower:
                     building_code = code
                     building_name = BUILDING_CODES[code]
-                    # Încearcă să extragă sala
-                    room_match = re.search(r'[-_]([a-z0-9\-\.]+)(?:@|$)', loc, re.IGNORECASE)
-                    if room_match:
-                        room = room_match.group(1).upper()
                     break
-    
+
+        # Try to extract room from the location text
+        if building_name:
+            room_match = re.search(r'[-_]([a-z0-9\-\.]+)(?:@|$)', loc, re.IGNORECASE)
+            if room_match:
+                room = room_match.group(1).upper()
+
     # Normalizează sala
     if room:
         room_normalized = normalize_room_code(room)
