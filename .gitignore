@@ -25,9 +25,16 @@ venv/
 .venv/
 /.venv/
 /venv/
+.venv*/
+/venv*/
 /.pytest_cache/
 backend.log
 playwright_captures/
+
+# Local dev / sensitive files
+cookies.txt
+get.html
+run_local.sh
 
 # CSV backup files (auto-generated)
 *.csv.bak.*
