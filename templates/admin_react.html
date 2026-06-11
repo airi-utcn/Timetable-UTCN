@@ -5,42 +5,403 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Panel - UTCN Timetable</title>
     <style>
-        /* Admin-specific overrides */
+        :root {
+            --bg: #f3f5f8;
+            --bg-raised: #ffffff;
+            --surface: #ffffff;
+            --surface-2: #edf1f6;
+            --border: #dfe5ec;
+            --border-2: #c3cdd9;
+            --text: #18222e;
+            --text-dim: #4e5d6d;
+            --text-faint: #8593a3;
+            --accent: #1b5cc4;
+            --accent-dim: #6f9bd9;
+            --accent-bg: rgba(27, 92, 196, .08);
+            --ok: #178a47;
+            --warn: #a3700f;
+            --danger: #c23a47;
+            --grid-line: rgba(27, 92, 196, .055);
+            --tick: var(--border-2);
+            --font: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            --font-mono: "SF Mono", "Roboto Mono", "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+            --radius: 8px;
+            --radius-sm: 7px;
+            --transition: 150ms ease;
+        }
+
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            min-height: 100vh;
+            font-family: var(--font);
+            background-color: var(--bg);
+            background-image:
+                linear-gradient(var(--grid-line) 1px, transparent 1px),
+                linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+            background-size: 28px 28px;
+            color: var(--text);
+            -webkit-font-smoothing: antialiased;
+        }
+        button, input, a { font: inherit; }
+        button { cursor: pointer; }
+
         .admin-header {
-            background: linear-gradient(135deg, #003366 0%, #004080 100%);
-            color: white;
-            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            background: var(--bg-raised);
+            color: var(--text);
+            padding: 14px 32px;
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 24px;
+            border-bottom: 1px solid var(--border);
+        }
+        .admin-header::after {
+            content: '';
+            position: absolute;
+            left: 0;
+            right: 0;
+            bottom: -4px;
+            height: 4px;
+            background: repeating-linear-gradient(90deg, var(--tick) 0 1px, transparent 1px 56px);
+            opacity: .55;
         }
         .admin-header h1 {
-            font-size: 1.5rem;
+            margin: 0;
+            font-size: 1.25rem;
+            font-weight: 750;
+            letter-spacing: 0;
             display: flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 12px;
+        }
+        .admin-header h1::before {
+            content: 'UT';
+            width: 40px;
+            height: 40px;
+            border-radius: 9px;
+            display: grid;
+            place-items: center;
+            font-family: var(--font-mono);
+            font-size: .9rem;
+            font-weight: 800;
+            color: var(--accent);
+            background: var(--accent-bg);
+            border: 1px solid var(--accent-dim);
         }
         .admin-header .back-link {
-            color: white;
+            color: var(--text-dim);
             text-decoration: none;
-            padding: 0.5rem 1rem;
-            border: 1px solid rgba(255,255,255,0.3);
-            border-radius: 4px;
-            transition: all 0.2s;
+            padding: 8px 16px;
+            border: 1px solid var(--border-2);
+            border-radius: var(--radius-sm);
+            background: var(--surface);
+            font-size: .92rem;
+            font-weight: 650;
+            transition: all var(--transition);
         }
         .admin-header .back-link:hover {
-            background: rgba(255,255,255,0.1);
+            color: var(--accent);
+            border-color: var(--accent-dim);
+            background: var(--accent-bg);
         }
         .admin-notice {
-            background: #fff3cd;
-            color: #856404;
-            padding: 0.75rem 1rem;
-            text-align: center;
-            font-size: 0.9rem;
+            max-width: 1200px;
+            margin: 24px auto 0;
+            padding: 10px 16px;
+            color: var(--text-dim);
+            background: var(--bg-raised);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-sm);
+            font-size: .86rem;
+            font-family: var(--font-mono);
+            letter-spacing: 0;
+            text-transform: uppercase;
         }
+
+        .admin-container {
+            max-width: 1200px !important;
+            padding: 24px !important;
+            margin: 0 auto !important;
+        }
+        .admin-loading {
+            max-width: 420px;
+            margin: 96px auto;
+            padding: 36px !important;
+            text-align: center;
+            background: var(--bg-raised);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            color: var(--text-dim);
+        }
+        .spinner {
+            width: 36px;
+            height: 36px;
+            margin: 0 auto 12px;
+            border-radius: 50%;
+            border: 3px solid var(--border);
+            border-top-color: var(--accent);
+            animation: spin .8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
         @keyframes pulse {
             0%, 100% { width: 30%; margin-left: 0; }
             50% { width: 50%; margin-left: 25%; }
+        }
+
+        .admin-message {
+            border-radius: var(--radius-sm) !important;
+            padding: 12px 16px !important;
+            margin-bottom: 16px !important;
+            border: 1px solid var(--border-2) !important;
+            background: var(--bg-raised) !important;
+            color: var(--text) !important;
+            font-size: .92rem;
+        }
+        .admin-message.success {
+            border-color: color-mix(in srgb, var(--ok) 45%, var(--border)) !important;
+            color: var(--ok) !important;
+        }
+        .admin-message.error,
+        .admin-message.expired {
+            border-color: color-mix(in srgb, var(--danger) 45%, var(--border)) !important;
+            color: var(--danger) !important;
+        }
+        .admin-message.warning {
+            border-color: color-mix(in srgb, var(--warn) 45%, var(--border)) !important;
+            color: var(--warn) !important;
+        }
+        .admin-message button {
+            border: 1px solid var(--accent-dim) !important;
+            background: var(--accent-bg) !important;
+            color: var(--accent) !important;
+            border-radius: var(--radius-sm) !important;
+            padding: 8px 12px !important;
+            font-weight: 650;
+        }
+
+        .admin-container > div[style*="text-align: right"] {
+            color: var(--text-faint) !important;
+            font-family: var(--font-mono);
+            font-size: .82rem !important;
+            text-transform: uppercase;
+            letter-spacing: 0;
+        }
+        .admin-stats {
+            display: grid !important;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)) !important;
+            gap: 16px !important;
+            margin-bottom: 24px !important;
+        }
+        .admin-stats > div,
+        .admin-container > div[style*="background: white"],
+        .admin-container > div[style*="background: rgb(255, 255, 255)"],
+        .admin-container > div[style*="background: #f8f9fa"] {
+            background: var(--bg-raised) !important;
+            border: 1px solid var(--border) !important;
+            border-radius: var(--radius) !important;
+            box-shadow: none !important;
+            position: relative;
+        }
+        .admin-stats > div::before,
+        .admin-container > div[style*="background: white"]::before,
+        .admin-container > div[style*="background: rgb(255, 255, 255)"]::before,
+        .admin-container > div[style*="background: #f8f9fa"]::before {
+            content: '';
+            position: absolute;
+            top: -1px;
+            left: -1px;
+            width: 9px;
+            height: 9px;
+            border-top: 2px solid var(--tick);
+            border-left: 2px solid var(--tick);
+            border-top-left-radius: var(--radius);
+            pointer-events: none;
+        }
+        .admin-stats > div {
+            padding: 18px !important;
+            text-align: left !important;
+        }
+        .admin-stats > div > div:first-child {
+            color: var(--accent) !important;
+            font-family: var(--font-mono);
+            font-variant-numeric: tabular-nums;
+            font-size: clamp(1.25rem, 2vw, 2rem) !important;
+            line-height: 1.1;
+        }
+        .admin-stats > div > div:last-child {
+            margin-top: 6px;
+            color: var(--text-faint) !important;
+            font-size: .78rem;
+            font-weight: 700;
+            letter-spacing: .7px;
+            text-transform: uppercase;
+        }
+
+        .admin-container h2,
+        .admin-container h3 {
+            margin-top: 0 !important;
+            color: var(--text) !important;
+            letter-spacing: 0;
+        }
+        .admin-container h2 {
+            margin-bottom: 16px !important;
+            font-size: 1.35rem;
+            font-weight: 750;
+        }
+        .admin-container h3 {
+            font-size: 1.1rem;
+            font-weight: 700;
+        }
+        .admin-container > div[style*="margin-bottom: 2rem"],
+        .admin-container > div[style*="margin-bottom: 1rem"] {
+            margin-bottom: 24px !important;
+            padding: 20px !important;
+        }
+
+        .admin-container input[type="url"],
+        .admin-container input[type="text"],
+        .admin-container input[type="file"] {
+            background: var(--surface) !important;
+            color: var(--text) !important;
+            border: 1px solid var(--border-2) !important;
+            border-radius: var(--radius-sm) !important;
+            padding: 9px 12px !important;
+            min-height: 40px;
+            outline: none;
+        }
+        .admin-container input:focus {
+            border-color: var(--accent) !important;
+        }
+        .admin-container input[type="color"] {
+            border: 1px solid var(--border-2) !important;
+            border-radius: var(--radius-sm) !important;
+            background: var(--surface) !important;
+            min-height: 40px;
+        }
+        .admin-container label {
+            color: var(--text-dim) !important;
+            font-weight: 600;
+        }
+        .admin-container button,
+        .admin-container a.btn {
+            border: 1px solid var(--border-2) !important;
+            background: var(--surface) !important;
+            color: var(--text) !important;
+            border-radius: var(--radius-sm) !important;
+            padding: 8px 14px !important;
+            min-height: 36px;
+            font-size: .9rem !important;
+            font-weight: 650 !important;
+            text-decoration: none !important;
+            transition: all var(--transition);
+        }
+        .admin-container button:hover,
+        .admin-container a.btn:hover {
+            background: var(--surface-2) !important;
+        }
+        .admin-container form button[type="submit"],
+        .admin-container button[style*="background: #003366"],
+        .admin-container button[style*="background: rgb(0, 51, 102)"],
+        #upload-csv-btn-global {
+            border-color: var(--accent-dim) !important;
+            background: var(--accent-bg) !important;
+            color: var(--accent) !important;
+        }
+        .admin-container button[style*="background: #28a745"],
+        .admin-container button[style*="background: rgb(40, 167, 69)"] {
+            border-color: color-mix(in srgb, var(--ok) 40%, var(--border)) !important;
+            background: color-mix(in srgb, var(--ok) 10%, var(--surface)) !important;
+            color: var(--ok) !important;
+        }
+        .admin-container button[style*="background: #dc3545"],
+        .admin-container button[style*="background: rgb(220, 53, 69)"] {
+            border-color: color-mix(in srgb, var(--danger) 42%, var(--border)) !important;
+            background: color-mix(in srgb, var(--danger) 8%, var(--surface)) !important;
+            color: var(--danger) !important;
+        }
+        .admin-container button:disabled {
+            opacity: .55;
+            cursor: default;
+        }
+
+        .admin-container > div[style*="background: white"] form,
+        .admin-container > div[style*="background: rgb(255, 255, 255)"] form {
+            gap: 10px !important;
+        }
+        .admin-container div[style*="border-left"] {
+            background: var(--surface) !important;
+            border: 1px solid var(--border) !important;
+            border-left-width: 4px !important;
+            border-radius: var(--radius-sm) !important;
+            min-height: 58px;
+        }
+        .admin-container div[style*="border-left"] > span:first-child {
+            color: var(--text) !important;
+            font-weight: 700 !important;
+        }
+        .admin-container div[style*="border-left"] span {
+            color: var(--text-dim) !important;
+        }
+        .admin-container div[style*="border-left"] span[style*="disabled"] {
+            color: var(--text-faint) !important;
+            border: 1px solid var(--border-2);
+            border-radius: 5px;
+            padding: 2px 8px;
+            font-style: normal !important;
+            font-size: .74rem !important;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+        }
+
+        .admin-container > div[style*="background: #fff3cd"],
+        .admin-container > div[style*="background: rgb(255, 243, 205)"],
+        .admin-container > div[style*="background: #e8f5e9"],
+        .admin-container > div[style*="background: rgb(232, 245, 233)"] {
+            background: var(--bg-raised) !important;
+            border: 1px solid var(--border) !important;
+            border-left: 3px solid var(--warn) !important;
+            border-radius: var(--radius) !important;
+        }
+        .admin-container > div[style*="background: #e8f5e9"],
+        .admin-container > div[style*="background: rgb(232, 245, 233)"] {
+            border-left-color: var(--ok) !important;
+        }
+        .admin-container div[style*="height: 4px"] {
+            background: var(--surface-2) !important;
+            height: 6px !important;
+            border-radius: 999px !important;
+        }
+        .admin-container div[style*="animation: pulse"] {
+            background: var(--warn) !important;
+            border-radius: 999px !important;
+        }
+
+        @media (max-width: 760px) {
+            .admin-header {
+                align-items: flex-start;
+                flex-direction: column;
+                padding: 14px 18px;
+            }
+            .admin-notice {
+                margin: 18px 18px 0;
+            }
+            .admin-container {
+                padding: 18px !important;
+            }
+            .admin-container div[style*="border-left"] {
+                align-items: flex-start !important;
+                flex-direction: column !important;
+                gap: 10px !important;
+            }
+            .admin-container input[type="url"],
+            .admin-container input[type="text"] {
+                min-width: min(100%, 280px) !important;
+                width: 100% !important;
+            }
         }
     </style>
 </head>
