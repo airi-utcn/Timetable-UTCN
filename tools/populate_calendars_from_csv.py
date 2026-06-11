@@ -34,8 +34,13 @@ def main():
     names_by_url = {}
     buildings_by_url = {}
     emails_by_url = {}
+    rooms_by_url = {}
     html_urls_by_url = {}  # primary url -> corresponding HTML URL for Playwright fallback
     import re
+    try:
+        from room_csv import room_from_sala_name
+    except ImportError:
+        from tools.room_csv import room_from_sala_name
 
     def _format_email_to_name(email: str) -> str:
         if not email:
@@ -70,6 +75,11 @@ def main():
                 buildings_by_url[url] = building
             if email:
                 emails_by_url[url] = email
+            # canonical room label from Nume_Sala (col 0) — numeric rooms
+            # like "40" are valid and must be preserved as-is
+            room = room_from_sala_name(row[0] if row else '')
+            if room:
+                rooms_by_url[url] = room
             # prefer email (col 1) to generate a name, fallback to col 0
             if email:
                 names_by_url[url] = _format_email_to_name(email)
@@ -112,12 +122,15 @@ def main():
                         cur.execute('UPDATE calendars SET name = ? WHERE url = ?', (name, url))
             except Exception:
                 pass
-            # Always update building, email, and html_url from CSV if available
+            # Always update building, email, room and html_url from CSV if available
             try:
                 if building:
                     cur.execute('UPDATE calendars SET building = ? WHERE url = ? AND (building IS NULL OR building = "")', (building, url))
                 if email:
                     cur.execute('UPDATE calendars SET email_address = ? WHERE url = ? AND (email_address IS NULL OR email_address = "")', (email, url))
+                room = rooms_by_url.get(url)
+                if room:
+                    cur.execute('UPDATE calendars SET room = ? WHERE url = ? AND (room IS NULL OR room = "")', (room, url))
                 if html_url:
                     cur.execute('UPDATE calendars SET html_url = ? WHERE url = ?', (html_url, url))
             except Exception:

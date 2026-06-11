@@ -9,6 +9,9 @@ import sqlite3
 import csv
 import sys
 
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+from room_csv import room_from_sala_name
+
 def normalize_url(url):
     """Normalize URL by stripping and lowercasing."""
     if not url:
@@ -51,10 +54,12 @@ def main():
             html_url = row[4].strip() if len(row) > 4 else ''
             ics_url = row[5].strip() if len(row) > 5 else ''
             
+            room = room_from_sala_name(name) or ''
+
             for url in (html_url, ics_url):
                 if url:
                     key = normalize_url(url)
-                    csv_map[key] = (email, name, building)
+                    csv_map[key] = (email, name, building, room)
 
     print(f"CSV keys: {len(csv_map)}")
 
@@ -68,16 +73,16 @@ def main():
     cur = conn.cursor()
 
     # Get all calendars
-    cur.execute('SELECT id, url, name, building, email_address FROM calendars')
+    cur.execute('SELECT id, url, name, building, email_address, room FROM calendars')
     calendars = cur.fetchall()
 
     matched = 0
     updated = 0
-    for cal_id, url, current_name, current_building, current_email in calendars:
+    for cal_id, url, current_name, current_building, current_email, current_room in calendars:
         key = normalize_url(url)
         if key in csv_map:
             matched += 1
-            csv_email, csv_name, csv_building = csv_map[key]
+            csv_email, csv_name, csv_building, csv_room = csv_map[key]
             # Update if different
             updates = {}
             if current_email != csv_email:
@@ -86,6 +91,8 @@ def main():
                 updates['name'] = csv_name
             if current_building != csv_building:
                 updates['building'] = csv_building
+            if csv_room and current_room != csv_room:
+                updates['room'] = csv_room
             
             if updates:
                 set_clause = ', '.join(f'{k} = ?' for k in updates)

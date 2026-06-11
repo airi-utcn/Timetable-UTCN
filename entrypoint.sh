@@ -14,6 +14,32 @@ echo "╔═══════════════════════�
 echo "║  UTCN Timetable - Starting (32GB/16vCPU optimized)         ║"
 echo "╚══════════════════════════════════════════════════════════════╝"
 
+# ── Sync shipped CSV into the config volume ──
+# /app/config is a named volume: after the first run it permanently shadows
+# the image's config directory, so a CSV updated in the repo (e.g. with new
+# rooms) would never reach the running container. Copy the shipped CSV over
+# the volume copy when the content differs. Set KEEP_VOLUME_CSV=1 to keep an
+# admin-uploaded CSV instead.
+CSV_NAME="Rooms_PUBLISHER_HTML-ICS(in).csv"
+if [ "${KEEP_VOLUME_CSV:-0}" != "1" ] && [ -f "/app/config_dist/$CSV_NAME" ]; then
+    if [ ! -f "/app/config/$CSV_NAME" ] || ! cmp -s "/app/config_dist/$CSV_NAME" "/app/config/$CSV_NAME"; then
+        if [ -f "/app/config/$CSV_NAME" ]; then
+            cp "/app/config/$CSV_NAME" "/app/config/$CSV_NAME.bak.$(date +%s)" || true
+            echo "  ⚠ Volume CSV differs from image CSV — updating (backup kept)"
+        fi
+        cp "/app/config_dist/$CSV_NAME" "/app/config/$CSV_NAME"
+        echo "  ✓ Synced shipped CSV into /app/config"
+    else
+        echo "  ✓ Volume CSV matches shipped CSV"
+    fi
+    # also sync alias config files if missing in the volume
+    for f in building_aliases.json room_aliases.json; do
+        if [ -f "/app/config_dist/$f" ] && [ ! -f "/app/config/$f" ]; then
+            cp "/app/config_dist/$f" "/app/config/$f" || true
+        fi
+    done
+fi
+
 # ── Database setup ──
 echo "⏳ Running database setup..."
 python3 /app/tools/init_db.py || true
@@ -47,6 +73,10 @@ for p in "${CSV_CANDIDATES[@]}"; do
         break
     fi
 done
+
+# ── Pipeline audit: shows discovered calendars and verifies room 40 etc. ──
+echo "⏳ Auditing calendar pipeline (CSV -> DB -> events -> schedule)..."
+python3 /app/tools/audit_calendars.py || echo "  ⚠ Audit reported problems (see above) — extraction may fix missing events"
 
 echo "✅ Setup complete"
 

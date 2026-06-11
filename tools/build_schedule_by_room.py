@@ -37,6 +37,9 @@ import sys
 
 # Import parserul inteligent pentru subiecte
 from subject_parser import get_parser, parse_title, get_mappings
+# Structured parser (canonical "Subject (type) year/group Professor" format)
+from title_parser import parse_structured, display_title as structured_display_title
+from room_csv import room_from_sala_name
 
 # Ensure stdout/stderr use UTF-8 where the platform default may be cp1252 (Windows).
 try:
@@ -62,35 +65,58 @@ def load_subject_mappings():
     return {}
 
 
-def guess_subject_and_room(title: str, location: str | None):
-    """Simpler extraction: return (subject, room, display_title, professor).
+def load_calendar_map() -> dict:
+    """Load calendar_map.json: source hash -> {name, room, building, color}."""
+    p = pathlib.Path('playwright_captures') / 'calendar_map.json'
+    if p.exists():
+        try:
+            with open(p, 'r', encoding='utf-8') as f:
+                return json.load(f) or {}
+        except Exception as e:
+            print(f'Warning: failed to read calendar_map.json: {e}')
+    return {}
 
-    Uses the intelligent subject parser to extract information from the title.
-    Falls back to location parsing for room when necessary.
+
+def resolve_room(source: str | None, location: str | None,
+                 calendar_map: dict) -> tuple[str | None, str | None]:
+    """Resolve (room, building) for an event.
+
+    Priority (per spec — the room must come from the room calendar the event
+    was fetched from, never from free text in the title):
+      1. calendar_map[source].room (populated from the publisher CSV)
+      2. room derived from calendar_map[source].name ("UTCN - AC Bar - Sala 40")
+      3. room parsed from the event's location field
+    """
+    meta = calendar_map.get(source or '') or {}
+    building = meta.get('building') or None
+
+    room = (meta.get('room') or '').strip() or None
+    if not room:
+        room = room_from_sala_name(meta.get('name') or '')
+    if not room and location:
+        room = room_from_location(location)
+    return room, building
+
+
+def guess_subject_and_room(title: str, location: str | None):
+    """Extract (subject, room, display_title, professor) from title text.
+
+    Room from the title is a legacy fallback only — bare numbers in titles
+    are usually groups/years, so only structured tokens (letters+digits,
+    e.g. "BT5.03") are accepted here.
     """
     if not title and not location:
         return (None, None, None, None)
 
     # Folosește parserul inteligent
     parsed = parse_title(title)
-    
+
     subject = parsed.subject_name or None
     display_title = parsed.display_title or title
     professor = parsed.professor
-    
-    # Încearcă să găsească camera din titlu sau din location
-    room = None
-    
-    # Mai întâi încearcă să găsească un token de cameră în titlu
-    t = (title or '').strip()
-    parts = t.split()
-    for tok in parts[::-1][:8]:
-        rt = normalize_room(tok)
-        if rt:
-            room = rt
-            break
 
-    if not room and location:
+    room = None
+    if location:
         room = room_from_location(location)
 
     return (subject, room, display_title, professor)
@@ -347,32 +373,60 @@ def filter_by_date(events, from_d: date, to_d: date):
     return out
 
 
-def build_schedule(events):
+def build_schedule(events, calendar_map=None):
     # group by room -> date -> list of events
+    if calendar_map is None:
+        calendar_map = load_calendar_map()
     schedule = defaultdict(lambda: defaultdict(list))
+    parse_warning_count = 0
     for ev in events:
         title = ev.get('title') or ''
         location = ev.get('location')
-        subj, room, display_title, professor = guess_subject_and_room(title, location)
+        source = ev.get('source') if isinstance(ev, dict) else None
+
+        # ── structured parse (canonical format) with legacy fallback ──
+        structured = parse_structured(title)
+        subj, room_legacy, legacy_display, professor = guess_subject_and_room(title, location)
+
+        if structured.matched:
+            subj = structured.subject_name or subj
+            professor = structured.professor_name or professor
+            disp = structured_display_title(structured)
+        else:
+            disp = legacy_display or title
+        if structured.warnings:
+            parse_warning_count += 1
+
+        # ── room: from the source room-calendar, never from title numbers ──
+        room, building = resolve_room(source, location, calendar_map)
         if not room:
-            room = location or 'UNKNOWN'
-        # normalize room string
+            room = room_legacy or location or 'UNKNOWN'
         room = str(room).strip()
+
         st = ev.get('start')
         end = ev.get('end')
         day = st.date().isoformat()
-        # capture professor if available from the loaded events or parsed from title
         prof = ev.get('professor') or professor or None
         schedule[room][day].append({
             'start': st,
             'end': end,
-            'title': display_title or title,  # Folosește titlul formatat
+            'title': disp or title,
+            'raw_title': title,
             'subject': subj,
+            'activity_type': structured.activity_type or None,
+            'year': structured.study_year or None,
+            'group': structured.group or None,
             'location': location,
+            'building': building,
             'professor': prof,
-            'source': ev.get('source') if isinstance(ev, dict) else None,
+            'source': source,
             'color': ev.get('color') if isinstance(ev, dict) else None,
+            'parse_warnings': structured.warnings or None,
         })
+
+    if parse_warning_count:
+        print(f'Note: {parse_warning_count} events had title-parse warnings '
+              f'(kept with warnings, not dropped)')
 
     # sort events in each day by start
     for room in schedule:
@@ -398,22 +452,31 @@ def save_outputs(schedule, out_dir: pathlib.Path):
     serial = {}
     for room, days in schedule.items():
         out_room = aliases.get(room, room)
-        serial[out_room] = {}
+        serial.setdefault(out_room, {})
         for day, evs in days.items():
-            serial[out_room][day] = []
+            serial[out_room].setdefault(day, [])
             for e in evs:
                 serial[out_room][day].append({
                     'start': e['start'].isoformat() if e['start'] else None,
                     'end': e['end'].isoformat() if e['end'] else None,
                     'title': e['title'],
+                    'raw_title': e.get('raw_title'),
                     'subject': e['subject'],
+                    'activity_type': e.get('activity_type'),
+                    'year': e.get('year'),
+                    'group': e.get('group'),
                     'location': e['location'],
+                    'building': e.get('building'),
                     'professor': e.get('professor'),
                     'source': e.get('source'),
-                    'color': e.get('color')
+                    'color': e.get('color'),
+                    'parse_warnings': e.get('parse_warnings'),
                 })
-    with open(jpath, 'w', encoding='utf-8') as f:
+    # atomic write so readers never see a half-written schedule
+    tmp_jpath = jpath.with_suffix('.json.tmp')
+    with open(tmp_jpath, 'w', encoding='utf-8') as f:
         json.dump(serial, f, indent=2, ensure_ascii=False)
+    tmp_jpath.replace(jpath)
 
     # also CSV: room, date, start, end, subject, title, location
     cpath = out_dir / 'schedule_by_room.csv'

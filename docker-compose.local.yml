@@ -17,6 +17,7 @@ services:
       - playwright_user_data:/app/playwright_data
     environment:
       FLASK_ENV: production
+      TZ: ${TZ:-Europe/Bucharest}
       FLASK_SECRET: ${FLASK_SECRET:-change-me-in-production}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
       PLAYWRIGHT_USER_DATA_DIR: /app/playwright_data

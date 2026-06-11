@@ -3,6 +3,9 @@ beautifulsoup4>=4.9.0
 ics>=0.7
 # ics 0.7.x requires tatsu <5.9; newer releases break import with ParserConfig buffer_class
 tatsu>=5.8,<5.9
+# Primary ICS parser: resolves VTIMEZONE and expands RRULE recurrences
+icalendar>=5.0
+recurring-ical-events>=2.1
 python-dateutil>=2.8.0
 Flask>=2.0.0
 playwright>=1.40.0

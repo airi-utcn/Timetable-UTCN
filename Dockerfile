@@ -27,9 +27,12 @@ RUN npm run build
 FROM python:3.12-slim-bookworm AS runtime
 
 # Set environment variables for performance
+# TZ is critical: date filtering and "today" comparisons must use Romanian
+# local time, otherwise events near midnight land on the wrong day.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     FLASK_ENV=production \
+    TZ=Europe/Bucharest \
     PORT=5000 \
     # pip parallelism
     PIP_NO_CACHE_DIR=1 \
@@ -64,6 +67,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     # Performance: dumb-init for proper signal handling with gunicorn
     dumb-init \
+    # Timezone database for TZ=Europe/Bucharest
+    tzdata \
     # Cleanup
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
@@ -88,6 +93,11 @@ COPY app.py timetable.py ./
 COPY templates/ templates/
 COPY tools/ tools/
 COPY config/ config/
+# Keep a pristine copy of the shipped config OUTSIDE the /app/config volume
+# mount. Named volumes shadow the image's /app/config forever after the first
+# run, so a CSV updated in the repo would never reach the VM (this is exactly
+# how rooms like "40" went missing). entrypoint.sh syncs newer CSVs from here.
+COPY config/ config_dist/
 COPY static/ static/
 COPY entrypoint.sh ./
 

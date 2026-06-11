@@ -1,196 +1,141 @@
 #!/usr/bin/env python3
 """
-Run extractor for all enabled calendars in the DB, save per-calendar
-events files named events_<hash>.json (sha1(url)[:8]) and then rebuild the
-schedule for the range [now - 60 days, now + 60 days].
+Run extraction for all enabled calendars in the DB.
 
-Optimized for 32 GB / 16 vCPU:
-  - ICS-direct calendars are fetched concurrently via ThreadPoolExecutor
-  - Playwright fallback calendars run with configurable concurrency
-  - Progress is written after each calendar for admin UI visibility
+For every enabled calendar this writes playwright_captures/events_<hash>.json
+(hash = sha1(url)[:8]) and updates calendar_map.json with the calendar's
+name/color/building/room so downstream room resolution can map events back to
+the room calendar they came from. Finally it rebuilds the merged schedule.
+
+Pipeline guarantees:
+  * every calendar is attempted — one failure never aborts the run
+    (allSettled semantics via ThreadPoolExecutor + per-future try/except)
+  * ICS fetching has timeouts + retries with backoff (tools/ics_fetch.py)
+  * recurring Outlook events are expanded inside the window
+  * a calendar that fetches OK but has zero events gets an EMPTY events file
+    (so stale data is cleared) and is reported in the summary
+  * a calendar that FAILS keeps its previous events file (graceful fallback)
+  * a final extraction_report.json + log summary shows: discovered, fetched,
+    failed, zero-event rooms, and whether numeric rooms (e.g. "40") are in.
 """
+import json
+import os
+import pathlib
 import sqlite3
 import subprocess
 import sys
-import os
-import hashlib
-import pathlib
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, timedelta
-import tempfile
-import json
+from datetime import date, datetime, timedelta
 
-# Try ICS-first parsing using timetable.parse_ics_from_url to avoid launching
-# Playwright when a public .ics feed is available. This is faster and more
-# reliable for canonical .ics endpoints.
+import hashlib
+
+# ensure project root is on path when run as a script from different CWDs
+proj_root = pathlib.Path(__file__).parent.parent
+if str(proj_root) not in sys.path:
+    sys.path.insert(0, str(proj_root))
+
 try:
-    # ensure project root is on path when run as a script from different CWDs
-    proj_root = pathlib.Path(__file__).parent.parent
-    if str(proj_root) not in sys.path:
-        sys.path.insert(0, str(proj_root))
-    from timetable import parse_ics_from_url
-except Exception:
-    parse_ics_from_url = None
-
+    from tools.ics_fetch import fetch_ics_events, FetchError
+except ImportError:
+    from ics_fetch import fetch_ics_events, FetchError  # type: ignore
 
 DB = pathlib.Path('data') / 'app.db'
 OUT_DIR = pathlib.Path('playwright_captures')
 OUT_DIR.mkdir(exist_ok=True)
 
-
-def get_enabled_urls(db_path):
-    conn = sqlite3.connect(str(db_path))
-    cur = conn.cursor()
-    # Fetch html_url alongside the primary (ICS) url so Playwright can use
-    # the HTML view as a fallback when ICS parsing fails.
-    try:
-        cur.execute("SELECT url, name, html_url FROM calendars WHERE enabled = 1 AND url IS NOT NULL")
-    except Exception:
-        # Old DB without html_url column — fall back to 2-column query
-        cur.execute("SELECT url, name FROM calendars WHERE enabled = 1 AND url IS NOT NULL")
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+# Extraction window: small past buffer + full semester ahead.
+# Must cover the build window used by ensure_schedule() in app.py.
+PAST_DAYS = int(os.environ.get('EXTRACT_PAST_DAYS', '30'))
+FUTURE_DAYS = int(os.environ.get('EXTRACT_FUTURE_DAYS', '240'))
 
 
 def sha8(s: str) -> str:
     return hashlib.sha1(s.encode('utf-8')).hexdigest()[:8]
 
 
-def run_for_url(url, name=None, env=None):
-    print('---')
-    print('Extracting:', name or url)
-    # Determine the +/-60 day range
-    today = date.today()
-    from_d = today - timedelta(days=60)
-    to_d = today + timedelta(days=60)
-
-    # First attempt: if we have an ICS parser available, try parsing the
-    # URL as an .ics feed. This covers both direct .ics URLs and HTML pages
-    # that return a calendar when requested directly.
-    if parse_ics_from_url is not None:
-        try:
-            # Many calendars in the CSV are direct .ics links; try parsing
-            events = parse_ics_from_url(url, verbose=False)
-            # filter events to requested window
-            events_in_range = [e for e in events if e.start and from_d <= e.start.date() <= to_d]
-            h = sha8(url)
-            ev_out = OUT_DIR / f'events_{h}.json'
-            if events_in_range:
-                # write per-calendar file
-                try:
-                    OUT_DIR.mkdir(parents=True, exist_ok=True)
-                    with open(ev_out, 'w', encoding='utf-8') as f:
-                        import json
-                        arr = []
-                        for e in events_in_range:
-                            arr.append({'start': e.start.isoformat() if e.start else None,
-                                        'end': e.end.isoformat() if e.end else None,
-                                        'title': e.title,
-                                        'location': e.location,
-                                        'description': e.description,
-                                        'source': h})
-                        json.dump(arr, f, indent=2, ensure_ascii=False)
-                    print('Wrote (ICS) ', ev_out)
-                    return True
-                except Exception as e:
-                    print('Failed to write ICS-derived events file for', url, '->', e)
-                    # fall through to HTML extractor fallback
-            else:
-                # Valid VCALENDAR but no events in range — write an empty file
-                # and treat as success (room has no bookings, don't need Playwright).
-                try:
-                    OUT_DIR.mkdir(parents=True, exist_ok=True)
-                    with open(ev_out, 'w', encoding='utf-8') as f:
-                        import json
-                        json.dump([], f)
-                    print('Wrote (ICS, no events in range)', ev_out)
-                except Exception:
-                    pass
-                return True
-        except Exception as e:
-            # ICS parse failed (not an ICS resource or network error) -> fallback
-            print('ICS parse failed for', url, '->', e)
-
-    # Fallback: run the Playwright-based HTML extractor
-    h = sha8(url)
-    # Use a per-URL temp directory to avoid clobbering shared events.json
-    tmp_out = OUT_DIR / f'_tmp_{h}'
-    tmp_out.mkdir(parents=True, exist_ok=True)
-    sub_env = dict(env) if env else os.environ.copy()
-    sub_env['EXTRACT_OUTPUT_DIR'] = str(tmp_out)
-    cmd = [sys.executable, str(pathlib.Path('tools') / 'extract_published_events.py'), url]
+def get_enabled_calendars(db_path):
+    """Return list of dicts for all enabled calendars (url, name, html_url, color, building, room)."""
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    cur = conn.cursor()
     try:
-        proc = subprocess.run(cmd, check=False, env=sub_env)
-        rc = proc.returncode
-    except Exception as e:
-        print('Failed to run extractor for', url, '->', e)
-        return False
+        cur.execute("""SELECT url, name, html_url, color, building, room
+                       FROM calendars WHERE enabled = 1 AND url IS NOT NULL""")
+        rows = [dict(r) for r in cur.fetchall()]
+    except sqlite3.OperationalError:
+        cur.execute("SELECT url, name FROM calendars WHERE enabled = 1 AND url IS NOT NULL")
+        rows = [{'url': r[0], 'name': r[1], 'html_url': None,
+                 'color': None, 'building': None, 'room': None}
+                for r in cur.fetchall()]
+    conn.close()
+    return rows
 
-    # if extractor produced events.json in temp dir, move to events_<hash>.json
-    ev_in = tmp_out / 'events.json'
-    if ev_in.exists():
-        ev_out = OUT_DIR / f'events_{h}.json'
-        try:
-            if ev_out.exists():
-                ev_out.unlink()
-            ev_in.rename(ev_out)
-            print('Wrote', ev_out)
-        except Exception as e:
-            print('Failed to move events.json ->', ev_out, e)
-            return False
-        finally:
+
+_map_lock = threading.Lock()
+
+
+def update_calendar_map(entries: dict):
+    """Merge entries (hash -> metadata) into calendar_map.json atomically."""
+    map_path = OUT_DIR / 'calendar_map.json'
+    with _map_lock:
+        cmap = {}
+        if map_path.exists():
             try:
-                import shutil
-                shutil.rmtree(tmp_out, ignore_errors=True)
+                cmap = json.loads(map_path.read_text(encoding='utf-8'))
             except Exception:
-                pass
-    else:
-        print('No events.json produced for', url)
-        try:
-            import shutil
-            shutil.rmtree(tmp_out, ignore_errors=True)
-        except Exception:
-            pass
-        return rc == 0
+                cmap = {}
+        cmap.update(entries)
+        tmp = map_path.with_suffix('.json.tmp')
+        tmp.write_text(json.dumps(cmap, indent=2, ensure_ascii=False), encoding='utf-8')
+        tmp.replace(map_path)
 
-    return True
+
+def write_events_file(h: str, events: list, cal: dict):
+    """Write per-calendar events file, tagging each event with its source hash."""
+    for ev in events:
+        ev['source'] = h
+        if cal.get('color'):
+            ev['color'] = cal['color']
+    ev_out = OUT_DIR / f'events_{h}.json'
+    tmp = ev_out.with_suffix('.json.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(events, f, indent=2, ensure_ascii=False, default=str)
+    tmp.replace(ev_out)
 
 
 def main():
-    raw_rows = get_enabled_urls(DB)
-    if not raw_rows:
+    calendars = get_enabled_calendars(DB)
+    total = len(calendars)
+    if not calendars:
         print('No enabled calendars found in DB')
         return 1
 
-    # Normalise rows to 3-tuples (url, name, html_url).
-    # Old DBs without html_url return 2-tuples; pad with None.
-    urls = []
-    for row in raw_rows:
-        url = row[0]
-        name = row[1] if len(row) > 1 else None
-        html_url = row[2] if len(row) > 2 else None
-        urls.append((url, name, html_url))
+    today = date.today()
+    from_d = today - timedelta(days=PAST_DAYS)
+    to_d = today + timedelta(days=FUTURE_DAYS)
 
-    # Prepare environment for Playwright (preserve any existing variable)
-    env = os.environ.copy()
-    env.setdefault('PYTHONUTF8', '1')
+    print(f'Discovered {total} enabled calendars in DB')
+    print(f'Extraction window: {from_d} .. {to_d} (Europe/Bucharest)')
 
-    # ── Concurrency tuning (from env or defaults for 16 vCPU) ──
-    # ICS parsing is I/O-bound (HTTP fetch) so we can run many in parallel.
-    # Playwright is memory-heavy (~300 MB per browser) so limit concurrency.
+    # quick visibility for the historically-missing numeric rooms
+    numeric_rooms = [c.get('name') or c['url'] for c in calendars
+                     if (c.get('name') or '').strip().split(' ')[-1].isdigit()]
+    has_room_40 = any((c.get('name') or '').strip().endswith(' 40') for c in calendars)
+    print(f'Numeric-named room calendars: {len(numeric_rooms)} '
+          f'(room "40" included: {"YES" if has_room_40 else "NO"})')
+
     ics_concurrency = int(os.environ.get('ICS_CONCURRENCY', '8'))
     pw_concurrency = int(os.environ.get('PLAYWRIGHT_CONCURRENCY', '4'))
 
-    total = len(urls)
     ok = 0
     fail = 0
-    _progress_lock = __import__('threading').Lock()
-
-    # helper to persist progress after each URL so the admin UI can show
-    # real-time counts even if the process is interrupted.
+    zero_event_rooms = []
+    failed_calendars = []
+    progress_lock = threading.Lock()
     progress_path = OUT_DIR / 'import_progress.json'
+
     def write_progress(last=None):
         try:
             info = {'total': total, 'succeeded': ok, 'failed': fail, 'last': last}
@@ -199,244 +144,208 @@ def main():
         except Exception as e:
             print('Failed to write progress file:', e)
 
-    # ── Phase 1: Try ICS-direct parsing in parallel ──
-    # Split calendars into ICS-parseable (fast) and fallback (Playwright).
-    ics_succeeded = set()   # URLs that succeeded via ICS
-    playwright_queue = []   # (url, name) tuples that need Playwright fallback
+    # ── Phase 1: ICS fetch in parallel (bounded) ──
+    playwright_queue = []
 
-    def try_ics(url_name):
-        """Attempt ICS parsing for a single URL. Returns (url, name, success)."""
-        url, name = url_name
-        return (url, name, run_for_url(url, name=name, env=env))
-
-    print(f'Phase 1: Attempting ICS-direct parsing for {total} calendars '
-          f'(concurrency={ics_concurrency})...')
-
-    # run_for_url already tries ICS first, then falls back to Playwright.
-    # But for the parallel phase, we only want the ICS-fast-path.
-    # We'll run all of them in parallel — ICS succeeds fast, Playwright
-    # subprocess will serialize naturally via the GIL / subprocess.
-    # However, to avoid launching too many Playwright subprocesses at once,
-    # we do a two-phase approach:
-    #   Phase 1: ICS only (no Playwright fallback) — highly parallel
-    #   Phase 2: Playwright fallback for failures — limited concurrency
-
-    def try_ics_only(url_entry):
-        """Try ICS parsing only (no Playwright fallback). Returns (url, name, html_url, success).
-
-        A calendar whose ICS feed returns a valid VCALENDAR with 0 events in
-        the ±60-day window is treated as a SUCCESS (the room simply has no
-        bookings). This prevents needlessly queuing it for the heavyweight
-        Playwright fallback, which would either produce nothing or crash.
-        An empty events_<hash>.json file is written so the downstream
-        file-count check still matches the number of calendars.
-        """
-        url, name, html_url = url_entry
-        if parse_ics_from_url is None:
-            return (url, name, html_url, False)
-        today = date.today()
-        from_d = today - timedelta(days=60)
-        to_d = today + timedelta(days=60)
+    def try_ics_only(cal: dict):
+        url = cal['url']
+        name = cal.get('name') or url
+        h = sha8(url)
         try:
-            events = parse_ics_from_url(url, verbose=False)
-            # ICS parse succeeded — determine how many are in the date window.
-            events_in_range = [e for e in events if e.start and from_d <= e.start.date() <= to_d]
-            h = sha8(url)
-            ev_out = OUT_DIR / f'events_{h}.json'
-            OUT_DIR.mkdir(parents=True, exist_ok=True)
-            if events_in_range:
-                arr = []
-                for e in events_in_range:
-                    arr.append({
-                        'start': e.start.isoformat() if e.start else None,
-                        'end': e.end.isoformat() if e.end else None,
-                        'title': e.title,
-                        'location': e.location,
-                        'description': e.description,
-                        'source': h
-                    })
-                with open(ev_out, 'w', encoding='utf-8') as f:
-                    json.dump(arr, f, indent=2, ensure_ascii=False)
-                print(f'  ✓ ICS OK: {name or url} ({len(arr)} events)')
-            else:
-                # Valid VCALENDAR but no events in the window — write an empty
-                # file so the file-count check at the end still passes.
-                with open(ev_out, 'w', encoding='utf-8') as f:
-                    json.dump([], f)
-                print(f'  ✓ ICS OK (no events in range): {name or url}')
-            return (url, name, html_url, True)
-        except Exception:
-            pass
-        return (url, name, html_url, False)
+            events = fetch_ics_events(url, from_d, to_d)
+        except FetchError as e:
+            print(f'  ✗ ICS failed: {name} -> {e}')
+            return (cal, False, None)
+        except Exception as e:  # never let one calendar kill the pool
+            print(f'  ✗ ICS unexpected error: {name} -> {e}')
+            return (cal, False, None)
+        write_events_file(h, events, cal)
+        update_calendar_map({h: {
+            'url': url,
+            'name': cal.get('name') or '',
+            'color': cal.get('color'),
+            'building': cal.get('building'),
+            'room': cal.get('room'),
+        }})
+        if events:
+            print(f'  ✓ ICS OK: {name} ({len(events)} events)')
+        else:
+            print(f'  ✓ ICS OK (0 events in window): {name}')
+        return (cal, True, len(events))
 
-    try:
-        with ThreadPoolExecutor(max_workers=ics_concurrency) as pool:
-            futures = {pool.submit(try_ics_only, (url, name, html_url)): (url, name, html_url)
-                       for url, name, html_url in urls}
-            for future in as_completed(futures):
-                url, name, html_url, success = future.result()
+    print(f'Phase 1: ICS fetch for {total} calendars (concurrency={ics_concurrency})...')
+    with ThreadPoolExecutor(max_workers=ics_concurrency) as pool:
+        futures = {pool.submit(try_ics_only, cal): cal for cal in calendars}
+        for future in as_completed(futures):
+            cal = futures[future]
+            try:
+                cal, success, n_events = future.result()
+            except Exception as e:
+                print(f'  ✗ worker crashed for {cal.get("name") or cal["url"]}: {e}')
+                success, n_events = False, None
+            with progress_lock:
                 if success:
-                    with _progress_lock:
-                        ok += 1
-                        ics_succeeded.add(url)
-                        write_progress(last=name or url)
+                    ok += 1
+                    if n_events == 0:
+                        zero_event_rooms.append(cal.get('name') or cal['url'])
                 else:
-                    playwright_queue.append((url, name, html_url))
+                    playwright_queue.append(cal)
+                write_progress(last=cal.get('name') or cal['url'])
 
-        print(f'Phase 1 complete: {ok} succeeded via ICS, '
-              f'{len(playwright_queue)} need Playwright fallback')
+    print(f'Phase 1 complete: {ok} via ICS, {len(playwright_queue)} need Playwright fallback')
 
-        # ── Phase 2: Playwright fallback (limited concurrency) ──
-        if playwright_queue:
-            print(f'Phase 2: Running Playwright extraction for {len(playwright_queue)} '
-                  f'calendars (concurrency={pw_concurrency})...')
+    # ── Phase 2: Playwright fallback (limited concurrency) ──
+    if playwright_queue:
+        env = os.environ.copy()
+        env.setdefault('PYTHONUTF8', '1')
+        print(f'Phase 2: Playwright extraction for {len(playwright_queue)} calendars '
+              f'(concurrency={pw_concurrency})...')
 
-            def run_playwright_for(url_entry):
-                url, name, html_url = url_entry
-                # Prefer the HTML URL for Playwright (it renders the Outlook
-                # SPA). Fall back to the primary URL if no HTML URL is stored.
-                pw_url = html_url or url
-                print(f'  → Playwright: {name or url}')
-                h = sha8(url)  # hash is always based on the primary (ICS) URL
-                # Each Playwright subprocess writes to its own temp directory
-                # so concurrent instances don't clobber each other's events.json.
-                tmp_out = OUT_DIR / f'_tmp_{h}'
-                tmp_out.mkdir(parents=True, exist_ok=True)
-                sub_env = dict(env)
-                sub_env['EXTRACT_OUTPUT_DIR'] = str(tmp_out)
-                cmd = [sys.executable, str(pathlib.Path('tools') / 'extract_published_events.py'), pw_url]
+        def run_playwright_for(cal: dict):
+            url = cal['url']
+            name = cal.get('name') or url
+            pw_url = cal.get('html_url') or url
+            h = sha8(url)  # hash is always based on the primary (ICS) URL
+            tmp_out = OUT_DIR / f'_tmp_{h}'
+            tmp_out.mkdir(parents=True, exist_ok=True)
+            sub_env = dict(env)
+            sub_env['EXTRACT_OUTPUT_DIR'] = str(tmp_out)
+            cmd = [sys.executable, str(pathlib.Path('tools') / 'extract_published_events.py'), pw_url]
+            try:
+                proc = subprocess.run(cmd, check=False, env=sub_env, timeout=300)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                print(f'  ✗ Playwright timeout: {name}')
+                return (cal, False, None)
+            except Exception as e:
+                print(f'  ✗ Playwright error: {name} -> {e}')
+                return (cal, False, None)
+            finally:
+                pass
+            ev_in = tmp_out / 'events.json'
+            n_events = None
+            success = False
+            if ev_in.exists():
                 try:
-                    proc = subprocess.run(cmd, check=False, env=sub_env)
-                    rc = proc.returncode
+                    data = json.loads(ev_in.read_text(encoding='utf-8'))
                 except Exception:
-                    return (url, name, False)
-                # move temp_dir/events.json -> events_<hash>.json in main dir
-                ev_in = tmp_out / 'events.json'
-                if ev_in.exists():
-                    ev_out = OUT_DIR / f'events_{h}.json'
-                    try:
-                        if ev_out.exists():
-                            ev_out.unlink()
-                        ev_in.rename(ev_out)
-                        print(f'  ✓ Playwright OK: {name or url}')
-                    except Exception:
-                        return (url, name, False)
-                    finally:
-                        # clean up temp dir
-                        try:
-                            import shutil
-                            shutil.rmtree(tmp_out, ignore_errors=True)
-                        except Exception:
-                            pass
-                    return (url, name, True)
-                # clean up temp dir even if no events.json produced
+                    data = []
+                write_events_file(h, data, cal)
+                update_calendar_map({h: {
+                    'url': url,
+                    'name': cal.get('name') or '',
+                    'color': cal.get('color'),
+                    'building': cal.get('building'),
+                    'room': cal.get('room'),
+                }})
+                n_events = len(data)
+                success = True
+                print(f'  ✓ Playwright OK: {name} ({n_events} events)')
+            else:
+                success = (rc == 0)
+                if not success:
+                    print(f'  ✗ Playwright produced no events.json: {name}')
+            try:
+                import shutil
+                shutil.rmtree(tmp_out, ignore_errors=True)
+            except Exception:
+                pass
+            return (cal, success, n_events)
+
+        with ThreadPoolExecutor(max_workers=pw_concurrency) as pool:
+            futures = {pool.submit(run_playwright_for, cal): cal for cal in playwright_queue}
+            for future in as_completed(futures):
+                cal = futures[future]
                 try:
-                    import shutil
-                    shutil.rmtree(tmp_out, ignore_errors=True)
-                except Exception:
-                    pass
-                return (url, name, rc == 0)
+                    cal, success, n_events = future.result()
+                except Exception as e:
+                    print(f'  ✗ worker crashed for {cal.get("name") or cal["url"]}: {e}')
+                    success, n_events = False, None
+                with progress_lock:
+                    if success:
+                        ok += 1
+                        if n_events == 0:
+                            zero_event_rooms.append(cal.get('name') or cal['url'])
+                    else:
+                        fail += 1
+                        failed_calendars.append(cal.get('name') or cal['url'])
+                    write_progress(last=cal.get('name') or cal['url'])
 
-            # Playwright launches full browsers, so limit concurrency
-            # On 16 vCPU / 32 GB we can safely run 4 browsers at once
-            # (each ~300-500 MB RAM + 1-2 CPU cores)
-            with ThreadPoolExecutor(max_workers=pw_concurrency) as pool:
-                futures = {pool.submit(run_playwright_for, item): item
-                           for item in playwright_queue}
-                for future in as_completed(futures):
-                    url, name, success = future.result()
-                    with _progress_lock:
-                        if success:
-                            ok += 1
-                        else:
-                            fail += 1
-                        write_progress(last=name or url)
+    # ── Summary ──
+    print('─' * 60)
+    print(f'EXTRACTION SUMMARY')
+    print(f'  calendars discovered : {total}')
+    print(f'  fetched successfully : {ok}')
+    print(f'  failed               : {fail}')
+    if failed_calendars:
+        print(f'  failed calendars     : {", ".join(failed_calendars[:20])}'
+              + (' …' if len(failed_calendars) > 20 else ''))
+    print(f'  rooms with 0 events  : {len(zero_event_rooms)}')
+    if zero_event_rooms:
+        print(f'    {", ".join(zero_event_rooms[:20])}'
+              + (' …' if len(zero_event_rooms) > 20 else ''))
+    print(f'  room "40" included   : {"YES" if has_room_40 else "NO — check CSV/DB!"}')
+    print('─' * 60)
 
-        print(f'Extraction finished: {ok} succeeded, {fail} failed, out of {total}')
-
-    except Exception:
-        # On unexpected exception we don't write the final import marker
-        # because not all calendars were processed. Re-raise so caller
-        # (or logs) will show the failure. Progress file contains partial
-        # counts.
-        raise
-
-    # Rebuild schedule for now-60d .. now+60d
-    today = date.today()
-    from_d = today - timedelta(days=60)
-    to_d = today + timedelta(days=60)
-    print('Rebuilding schedule from', from_d.isoformat(), 'to', to_d.isoformat())
-    cmd = [sys.executable, str(pathlib.Path('tools') / 'build_schedule_by_room.py'), '--from', from_d.isoformat(), '--to', to_d.isoformat()]
+    report = {
+        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'window': {'from': from_d.isoformat(), 'to': to_d.isoformat()},
+        'discovered': total,
+        'succeeded': ok,
+        'failed': fail,
+        'failed_calendars': failed_calendars,
+        'zero_event_rooms': zero_event_rooms,
+        'room_40_included': has_room_40,
+    }
     try:
-        subprocess.run(cmd, check=False)
+        with open(OUT_DIR / 'extraction_report.json', 'w', encoding='utf-8') as f:
+            json.dump(report, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        print('Failed to write extraction report:', e)
+
+    # ── Rebuild schedule for the same window ──
+    print('Rebuilding schedule from', from_d.isoformat(), 'to', to_d.isoformat())
+    cmd = [sys.executable, str(pathlib.Path('tools') / 'build_schedule_by_room.py'),
+           '--from', from_d.isoformat(), '--to', to_d.isoformat()]
+    try:
+        subprocess.run(cmd, check=False, timeout=300)
         print('Schedule rebuild finished (check playwright_captures/schedule_by_room.json)')
     except Exception as e:
         print('Schedule rebuild failed:', e)
         return 1
 
-    # If all calendars were processed, write the final import marker atomically.
+    # ── Final import marker ──
     try:
         if ok + fail == total:
-            # Before writing the final marker ensure the number of per-calendar
-            # files on disk matches the number of calendars. This avoids
-            # marking import as ready when files are still missing.
-            from datetime import datetime
             marker = OUT_DIR / 'import_complete.txt'
             tmp = OUT_DIR / (marker.name + '.tmp')
-            info = {
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'total_calendars': total,
-                'succeeded': ok,
-                'failed': fail
-            }
+            write_progress(last=None)
 
-            # update progress one last time
-            try:
-                write_progress(last=None)
-            except Exception:
-                pass
-
-            # wait a short while for filesystem visibility (in case of NFS/overlayfs)
-            MAX_RETRIES = 5
-            SLEEP_SEC = 1
             files_count = 0
-            for attempt in range(MAX_RETRIES):
+            for _attempt in range(5):
                 try:
                     files_count = len(list(OUT_DIR.glob('events_*.json')))
                 except Exception:
                     files_count = 0
-                if files_count >= total:
+                if files_count >= ok:
                     break
-                time.sleep(SLEEP_SEC)
+                time.sleep(1)
 
-            # Persist the final files_count into the progress file
             try:
-                write_progress(last=None)
-                # augment progress file with files_count and finished flag
-                prog = OUT_DIR / 'import_progress.json'
-                try:
-                    prog_j = json.load(open(prog, 'r', encoding='utf-8'))
-                except Exception:
-                    prog_j = {}
-                prog_j['files_count'] = files_count
-                prog_j['finished'] = True
-                prog_j['finished_at'] = datetime.utcnow().isoformat() + 'Z'
-                with open(prog, 'w', encoding='utf-8') as pf:
-                    json.dump(prog_j, pf, indent=2, ensure_ascii=False)
+                prog = json.loads(progress_path.read_text(encoding='utf-8'))
             except Exception:
-                pass
+                prog = {}
+            prog['files_count'] = files_count
+            prog['finished'] = True
+            prog['finished_at'] = datetime.utcnow().isoformat() + 'Z'
+            with open(progress_path, 'w', encoding='utf-8') as pf:
+                json.dump(prog, pf, indent=2, ensure_ascii=False)
 
-            if files_count == total:
-                try:
-                    with open(tmp, 'w', encoding='utf-8') as mf:
-                        mf.write('Import complete\n')
-                        json.dump(info, mf, indent=2, ensure_ascii=False)
-                    tmp.replace(marker)
-                    print('Import complete — marker written to', marker)
-                except Exception as e:
-                    print('Failed to write import marker:', e)
-            else:
-                print(f'Files on disk ({files_count}) do not match calendar count ({total}); skipping final import marker')
+            with open(tmp, 'w', encoding='utf-8') as mf:
+                mf.write('Import complete\n')
+                json.dump(report, mf, indent=2, ensure_ascii=False)
+            tmp.replace(marker)
+            print('Import complete — marker written to', marker)
     except Exception as e:
         print('Error while finalizing import marker:', e)
 

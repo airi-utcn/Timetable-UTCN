@@ -86,26 +86,71 @@ def find_ics_url_from_html(html: str, base_url: str) -> Optional[str]:
     return None
 
 
-def parse_ics_from_url(ics_url: str, verbose: bool = False) -> List[Event]:
-    """Try to fetch and parse an .ics URL.
+def parse_ics_from_url(ics_url: str, verbose: bool = False,
+                       from_date: Optional[date] = None,
+                       to_date: Optional[date] = None) -> List[Event]:
+    """Fetch and parse an .ics URL via the robust fetch layer.
 
-    If the server returns non-ICS content, save it to a file for inspection when verbose=True.
+    Uses tools/ics_fetch.py: HTTP timeouts, retries with backoff, RRULE
+    recurrence expansion and Europe/Bucharest timezone conversion. Falls back
+    to the legacy in-module parser only when the new module is unavailable.
+
+    from_date/to_date bound the recurrence-expansion window (default:
+    today-60d .. today+240d, matching the schedule build window).
     """
+    today = date.today()
+    if from_date is None:
+        from_date = today - timedelta(days=60)
+    if to_date is None:
+        to_date = today + timedelta(days=240)
+
+    try:
+        from tools.ics_fetch import fetch_ics_events, FetchError
+    except ImportError:
+        try:
+            import sys as _sys, pathlib as _pl
+            _sys.path.insert(0, str(_pl.Path(__file__).parent / 'tools'))
+            from ics_fetch import fetch_ics_events, FetchError  # type: ignore
+        except ImportError:
+            fetch_ics_events = None
+            FetchError = RuntimeError
+
+    if fetch_ics_events is not None:
+        try:
+            raw = fetch_ics_events(ics_url, from_date, to_date)
+        except FetchError as e:
+            if verbose:
+                print(f"Failed to fetch/parse '{ics_url}': {e}")
+            raise RuntimeError(str(e))
+        events: List[Event] = []
+        for item in raw:
+            try:
+                start = dtparser.parse(item["start"]) if item.get("start") else None
+                end = dtparser.parse(item["end"]) if item.get("end") else None
+                if start is None:
+                    continue
+                events.append(Event(start=start, end=end,
+                                    title=item.get("title") or "",
+                                    location=item.get("location") or "",
+                                    description=item.get("description") or ""))
+            except Exception:
+                continue
+        return events
+
+    # ── Legacy fallback (no recurrence expansion, no retries) ──
     if Calendar is None:
         raise RuntimeError("ics library not installed; please pip install -r requirements.txt")
 
     headers = {"Accept": "text/calendar, text/plain, */*;q=0.1"}
-    resp = requests.get(ics_url, headers=headers)
+    resp = requests.get(ics_url, headers=headers, timeout=(10, 45))
     resp.raise_for_status()
 
     body = resp.text
     ct = resp.headers.get("Content-Type", "")
-    # Quick detection: ICS files start with BEGIN:VCALENDAR
     if body.lstrip().upper().startswith("BEGIN:VCALENDAR") or "text/calendar" in ct:
         cal = Calendar(body)
-        events: List[Event] = []
+        events = []
         for e in cal.events:
-            # ics.Event has .begin and .end as Arrow/pendulum-like objects
             try:
                 start = e.begin.naive
             except Exception:
@@ -117,9 +162,7 @@ def parse_ics_from_url(ics_url: str, verbose: bool = False) -> List[Event]:
             events.append(Event(start=start, end=end, title=e.name or "", location=e.location or "", description=e.description or ""))
         return events
 
-    # Not recognized as an ICS response
     if verbose:
-        # save response for inspection
         fname = "last_ics_response.html"
         with open(fname, "w", encoding="utf-8") as f:
             f.write(body)

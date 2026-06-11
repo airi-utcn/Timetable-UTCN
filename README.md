@@ -29,14 +29,32 @@ The system ingests room calendars published by Outlook/Exchange for ~200 rooms, 
 
 ## Features
 
-- **Dual-URL Pipeline**: Fast, concurrent ICS feed parsing with a robust HTML/Playwright scraping fallback.
-- **Data Normalization**: Cleans and standardizes subject names, groups, and room details.
-- **Modern Frontend**: A responsive React SPA built with Vite, offering:
-  - **Schedule View**: A classic weekly timetable grid, filterable by room, subject, or professor.
-  - **Departures View**: A "departures board" style display for today's and tomorrow's events.
-  - **Admin Panel**: Manage calendar sources, trigger manual data imports, and add extracurricular events.
-- **Automated Deployment**: A single `deploy.sh` script for setting up and running the entire stack via Docker.
-- **Extensible**: Easily add new calendar sources or custom event parsers.
+- **Robust Fetch Pipeline** (`tools/ics_fetch.py`): HTTP timeouts, retries with
+  exponential backoff, **RRULE recurrence expansion** (weekly classes appear on
+  every date, not just once) and Europe/Bucharest timezone conversion, with a
+  Playwright HTML-scraping fallback. Calendars are fetched in a bounded
+  thread pool with allSettled semantics — one failing calendar never breaks
+  the rest.
+- **Structured Title Parser** (`tools/title_parser.py`): parses
+  `Subject (type) year[/group] Professor` titles (RO + EN activity names,
+  normalized to exam/lecture/laboratory/seminar/project). Malformed titles are
+  kept with `parse_warnings` instead of being dropped.
+- **Calendar-Based Room Resolution**: the room shown for an event always comes
+  from the Outlook room calendar it was fetched from (publisher CSV →
+  `calendar_map.json`), never from numbers guessed out of event titles —
+  numeric rooms like "40" work correctly.
+- **Modern Frontend**: a dark, UTCN-branded React SPA built with Vite:
+  - **Schedule View**: day/week/browse modes with filters, search and a calendar legend.
+  - **Live Board**: "now / upcoming / tomorrow" rotation with live statuses.
+  - **TV / Campus Display Mode** (`/?tv=1` or the *Display* button): full-screen
+    signage with a live clock, NOW / COMING UP columns, free-room indicators and
+    automatic page rotation — sized for 16:9 TVs and projectors. Pin a building
+    with `/?tv=1&building=Baritiu%20Electro%20Cluj`.
+  - **Admin Panel**: manage calendar sources, trigger imports, add events.
+- **Pipeline Audit** (`tools/audit_calendars.py`): one command shows
+  CSV → DB → events-files → schedule consistency and explicitly verifies that
+  rooms such as "40" are included end to end. Runs automatically at container start.
+- **Automated Deployment**: a single `deploy.sh` script for the Docker stack.
 
 ## Tech Stack
 

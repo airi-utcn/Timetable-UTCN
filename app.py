@@ -1477,6 +1477,54 @@ def delete_manual_db(man_id: int):
         conn.commit()
 
 
+def _run_extractors_parallel(entries) -> int:
+    """Run _run_extractor_for_url for many calendars with bounded concurrency.
+
+    allSettled semantics: every calendar is attempted; one failure never
+    aborts the batch. Returns the number of calendars that succeeded.
+    A summary (incl. failed calendar names) is appended to the extractor log.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    concurrency = max(1, int(os.environ.get('ICS_CONCURRENCY', '8')))
+    succeeded = 0
+    failed_names = []
+
+    def _one(entry):
+        u, name = entry[0], entry[1]
+        html_fallback = entry[2] if len(entry) >= 3 else None
+        try:
+            return (name or u, _run_extractor_for_url(u, name, html_url=html_fallback))
+        except Exception as e:
+            app.logger.warning('extractor crashed for %s: %s', name or u, e)
+            return (name or u, 1)
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        futures = [pool.submit(_one, e) for e in entries]
+        for fut in as_completed(futures):
+            try:
+                name, rc = fut.result()
+            except Exception:
+                continue
+            if rc == 0:
+                succeeded += 1
+            else:
+                failed_names.append(name)
+
+    try:
+        ts = datetime.now().isoformat()
+        ll = extractor_state.setdefault('log', [])
+        msg = (f"{ts} - BATCH SUMMARY: {succeeded}/{len(entries)} calendars fetched OK")
+        if failed_names:
+            msg += f"; failed: {', '.join(failed_names[:15])}" + (' …' if len(failed_names) > 15 else '')
+        ll.append(msg)
+        app.logger.info(msg)
+        if len(ll) > 5000:
+            del ll[0:len(ll)-5000]
+    except Exception:
+        pass
+    return succeeded
+
+
 def _run_extractor_background():
     """Internal: run the extractor script and update extractor_state."""
     out_dir = pathlib.Path('playwright_captures')
@@ -1611,15 +1659,10 @@ def _run_extractor_background():
         except Exception:
             pass
 
-        for entry in combined:
-            try:
-                u, name = entry[0], entry[1]
-                html_fallback = entry[2] if len(entry) >= 3 else None
-                rc = _run_extractor_for_url(u, name, html_url=html_fallback)
-                if rc == 0:
-                    any_rc = True
-            except Exception:
-                continue
+        # Bounded parallel fetch — one slow/failed calendar no longer blocks
+        # the rest (the old sequential loop with no HTTP timeout could hang
+        # the whole import behind a single dead connection).
+        any_rc = _run_extractors_parallel(combined) > 0
 
         # After running per-calendar extraction, regenerate the merged schedule
         try:
@@ -1650,7 +1693,7 @@ def _run_extractor_background():
                 f.write(datetime.utcnow().isoformat() + '\n')
             # import_progress.json with final totals
             total = len(combined)
-            succeeded = sum(1 for u, n in combined if (pathlib.Path('playwright_captures') / f'events_{hashlib.sha1(u.encode("utf-8")).hexdigest()[:8]}.json').exists())
+            succeeded = sum(1 for entry in combined if (pathlib.Path('playwright_captures') / f'events_{hashlib.sha1(entry[0].encode("utf-8")).hexdigest()[:8]}.json').exists())
             import json as _json
             with open(cap_dir / 'import_progress.json', 'w', encoding='utf-8') as f:
                 _json.dump({
@@ -1729,94 +1772,96 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
     except Exception:
         url_l = ''
     if '.ics' in url_l or url_l.endswith('.ics'):
+        # Try to parse .ics directly (faster and more reliable than Playwright).
+        # parse_ics_from_url now goes through tools/ics_fetch.py: timeouts,
+        # retries with backoff, RRULE expansion, Europe/Bucharest timezone.
+        ics_fetch_ok = False
+        parsed = []
         try:
-            # Try to parse .ics directly (faster and more reliable than spinning up Playwright)
-            parsed = []
+            today_ics = date.today()
+            from_d_ics = today_ics - timedelta(days=30)
+            to_d_ics = today_ics + timedelta(days=240)
+            parsed = parse_ics_from_url(url, verbose=False,
+                                        from_date=from_d_ics, to_date=to_d_ics)
+            ics_fetch_ok = True
+        except Exception as e:
+            # Fetch/parse failed after retries — keep any previous events file
+            # (graceful fallback) and let the Playwright path try below.
             try:
-                parsed = parse_ics_from_url(url, verbose=True)
-            except Exception as e:
-                parsed = []
-            # convert to simple dicts and write per-calendar events file
-            # Filter to ±60 day window to avoid storing unbounded history
-            if parsed is not None:
-                today_ics = date.today()
-                from_d_ics = today_ics - timedelta(days=60)
-                to_d_ics = today_ics + timedelta(days=60)
-                data = []
-                for ev in parsed:
-                    try:
-                        if ev.start:
-                            ev_date = ev.start.date() if hasattr(ev.start, 'date') else ev.start
-                            if ev_date < from_d_ics or ev_date > to_d_ics:
-                                continue
-                        data.append({'start': ev.start.isoformat() if ev.start else None,
-                                     'end': ev.end.isoformat() if ev.end else None,
-                                     'title': ev.title or '',
-                                     'location': ev.location or '',
-                                     'raw': {}})
-                    except Exception:
-                        continue
+                ts = datetime.now().isoformat()
+                ll = extractor_state.setdefault('log', [])
+                ll.append(f"{ts} - ICS FETCH FAILED: {_display_name_for(url, calendar_name)} -> {e}")
+                if len(ll) > 5000:
+                    del ll[0:len(ll)-5000]
+            except Exception:
+                pass
 
-                # Only write when we actually have events — do NOT overwrite
-                # an existing (possibly non-empty) file with an empty array.
-                # Most ICS feeds return an empty VCALENDAR (0 VEVENTs) for
-                # rooms with no current bookings; writing [] would clobber
-                # data that the full-extraction pipeline produced earlier.
-                if not data:
-                    # Return success (ICS parse succeeded) but skip the file write
-                    return 0
-
-                # write per-calendar events file and mapping just like extractor would
+        if ics_fetch_ok:
+            data = []
+            for ev in parsed:
                 try:
-                    h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
-                    out_dir = pathlib.Path('playwright_captures')
-                    out_dir.mkdir(exist_ok=True)
-                    ev_out = out_dir / f'events_{h}.json'
-                    with open(ev_out, 'w', encoding='utf-8') as f:
-                        json.dump(data, f, indent=2, ensure_ascii=False, default=str)
-                    # update calendar_map.json
+                    if ev.start:
+                        ev_date = ev.start.date() if hasattr(ev.start, 'date') else ev.start
+                        if ev_date < from_d_ics or ev_date > to_d_ics:
+                            continue
+                    data.append({'start': ev.start.isoformat() if ev.start else None,
+                                 'end': ev.end.isoformat() if ev.end else None,
+                                 'title': ev.title or '',
+                                 'location': ev.location or '',
+                                 'source': h,
+                                 'raw': {}})
+                except Exception:
+                    continue
+
+            # The fetch succeeded, so the result is authoritative: write the
+            # file even when empty so stale events from removed bookings are
+            # cleared and zero-event rooms are visible in diagnostics.
+            try:
+                out_dir = pathlib.Path('playwright_captures')
+                out_dir.mkdir(exist_ok=True)
+                ev_out = out_dir / f'events_{h}.json'
+                with open(ev_out, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+                # update calendar_map.json with full metadata (incl. room)
+                try:
+                    map_path = out_dir / 'calendar_map.json'
+                    cmap = {}
+                    if map_path.exists():
+                        with open(map_path, 'r', encoding='utf-8') as mf:
+                            cmap = json.load(mf)
+                    name = None
+                    color = None
+                    building = None
+                    room = None
                     try:
-                        map_path = out_dir / 'calendar_map.json'
-                        cmap = {}
-                        if map_path.exists():
-                            with open(map_path, 'r', encoding='utf-8') as mf:
-                                cmap = json.load(mf)
-                        name = None
-                        color = None
-                        building = None
-                        room = None
-                        try:
-                            init_db()
-                            rows = list_calendar_urls()
-                            for r in rows:
-                                if r.get('url') == url:
-                                    name = r.get('name')
-                                    color = r.get('color')
-                                    building = r.get('building')
-                                    room = r.get('room')
-                                    break
-                        except Exception:
-                            pass
-                        cmap[h] = {'url': url, 'name': name or '', 'color': color, 'building': building, 'room': room}
-                        with open(map_path, 'w', encoding='utf-8') as mf:
-                            json.dump(cmap, mf, indent=2, ensure_ascii=False)
+                        init_db()
+                        rows = list_calendar_urls()
+                        for r in rows:
+                            if r.get('url') == url:
+                                name = r.get('name')
+                                color = r.get('color')
+                                building = r.get('building')
+                                room = r.get('room')
+                                break
                     except Exception:
                         pass
-
-                    # update extractor_state and return success rc 0
-                    extractor_state['events_extracted'] = len(data)
-                    extractor_state['progress_message'] = f"Parsed {len(data)} events from ICS feed {_display_name_for(url, calendar_name)}"
-                    ts = datetime.now().isoformat()
-                    ll = extractor_state.setdefault('log', [])
-                    ll.append(f"{ts} - ICS PARSE: Parsed {len(data)} events from {_display_name_for(url, calendar_name)}")
-                    if len(ll) > 5000:
-                        del ll[0:len(ll)-5000]
-                    return 0
+                    cmap[h] = {'url': url, 'name': name or '', 'color': color, 'building': building, 'room': room}
+                    with open(map_path, 'w', encoding='utf-8') as mf:
+                        json.dump(cmap, mf, indent=2, ensure_ascii=False)
                 except Exception:
-                    # fallthrough to running playwright extractor if ICS parsing failed
                     pass
-        except Exception:
-            pass
+
+                extractor_state['events_extracted'] = len(data)
+                extractor_state['progress_message'] = f"Parsed {len(data)} events from ICS feed {_display_name_for(url, calendar_name)}"
+                ts = datetime.now().isoformat()
+                ll = extractor_state.setdefault('log', [])
+                ll.append(f"{ts} - ICS PARSE: Parsed {len(data)} events from {_display_name_for(url, calendar_name)}")
+                if len(ll) > 5000:
+                    del ll[0:len(ll)-5000]
+                return 0
+            except Exception:
+                # fallthrough to running playwright extractor if write failed
+                pass
 
     # Playwright fallback: use the HTML calendar URL when available because the
     # ICS URL is not a renderable web page.  Hash stays based on the primary URL
@@ -2006,18 +2051,8 @@ def periodic_fetcher(interval_minutes: int = 60):
                 # No CSV configured -> nothing to do this cycle
                 continue
 
-            # Run extractor for each URL sequentially
-            any_success = False
-            for entry in urls_with_names:
-                # Support both old 2-tuples and new 3-tuples (url, name, html_url)
-                if len(entry) >= 3:
-                    u, name, html_fallback = entry[0], entry[1], entry[2]
-                else:
-                    u, name = entry[0], entry[1]
-                    html_fallback = None
-                rc = _run_extractor_for_url(u, name, html_url=html_fallback)
-                if rc == 0:
-                    any_success = True
+            # Bounded parallel fetch with allSettled semantics
+            any_success = _run_extractors_parallel(urls_with_names) > 0
 
             if any_success:
                 periodic_fetch_state['last_success'] = datetime.utcnow().isoformat()
@@ -2636,36 +2671,38 @@ def events_json():
                         continue
                 title = e.get('title') or ''
                 location = e.get('location') or ''
-                
-                # Use event parser to extract structured data
-                parsed_subject = ''
-                parsed_prof = ''
-                parsed_building = ''
+
+                # Prefer structured fields stored at schedule-build time
+                # (tools/build_schedule_by_room.py + tools/title_parser.py).
+                # Re-parse with the legacy event parser only when the stored
+                # data predates the structured pipeline.
+                parsed_subject = e.get('subject') or ''
+                parsed_prof = e.get('professor') or ''
+                parsed_building = e.get('building') or ''
                 parsed_room = ''
                 display_title = title
-                
-                if parse_event:
+                parsed_year = e.get('year') or ''
+                parsed_group = e.get('group') or ''
+                has_structured = bool(e.get('activity_type') or e.get('raw_title'))
+
+                if not has_structured and parse_event:
                     try:
                         parsed = parse_event(e)
-                        parsed_subject = parsed.get('subject', '')
-                        parsed_prof = parsed.get('professor', '')
-                        parsed_building = parsed.get('building', '')
+                        parsed_subject = parsed.get('subject', '') or parsed_subject
+                        parsed_prof = parsed.get('professor', '') or parsed_prof
+                        parsed_building = parsed.get('building', '') or parsed_building
                         parsed_room = parsed.get('room', '')
                         display_title = parsed.get('display_title', '') or title
-                        parsed_year = parsed.get('year', '')
-                        parsed_group = parsed.get('group', '')
+                        parsed_year = parsed.get('year', '') or parsed_year
+                        parsed_group = parsed.get('group', '') or parsed_group
                     except Exception:
-                        parsed_year = ''
-                        parsed_group = ''
-                else:
-                    parsed_year = ''
-                    parsed_group = ''
-                
+                        pass
+
                 # Fallback to existing data if parser didn't find anything
                 subject = parsed_subject or (e.get('subject') or '')
                 prof = parsed_prof or (e.get('professor') or '')
                 building = parsed_building or ''
-                room_parsed = parsed_room or room
+                room_parsed = room or parsed_room
 
                 hay = (title + ' ' + subject + ' ' + display_title).lower()
                 if subject_filter and subject_filter not in hay:
@@ -2678,11 +2715,13 @@ def events_json():
                 ev = {
                     'title': title,
                     'display_title': display_title,
+                    'raw_title': e.get('raw_title') or title,
                     'start': start,
                     'end': end,
                     'room': room_parsed or room,
                     'building': building,
                     'subject': subject,
+                    'activity_type': e.get('activity_type') or '',
                     'professor': prof,
                     'location': location,
                     'color': None,
@@ -2691,6 +2730,7 @@ def events_json():
                     'year': parsed_year,
                     'group': parsed_group,
                     'group_display': parsed_group or '',
+                    'parse_warnings': e.get('parse_warnings') or None,
                 }
                 # resolve color and calendar_name from merged metadata or calendar_map
                 try:

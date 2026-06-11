@@ -15,6 +15,8 @@ services:
       - playwright_user_data:/app/playwright_data
     environment:
       - FLASK_ENV=production
+      # Romanian local time for correct "today" / date-window filtering
+      - TZ=${TZ:-Europe/Bucharest}
       - FLASK_SECRET=${FLASK_SECRET:-change-me-in-production}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-admin123}
@@ -35,6 +37,13 @@ services:
       # Playwright parallel extraction (use up to 6 concurrent browsers)
       - PLAYWRIGHT_CONCURRENCY=6
       - PLAYWRIGHT_BROWSER_TIMEOUT=90000
+      # ICS HTTP fetch concurrency (bounded thread pool)
+      - ICS_CONCURRENCY=${ICS_CONCURRENCY:-8}
+      # Extraction window (days before/after today; recurrence expansion bound)
+      - EXTRACT_PAST_DAYS=${EXTRACT_PAST_DAYS:-30}
+      - EXTRACT_FUTURE_DAYS=${EXTRACT_FUTURE_DAYS:-240}
+      # Set to 1 to keep an admin-uploaded CSV instead of the image's copy
+      - KEEP_VOLUME_CSV=${KEEP_VOLUME_CSV:-0}
       # Python memory / GC tweaks
       - PYTHONMALLOC=pymalloc
       - PYTHONHASHSEED=random
