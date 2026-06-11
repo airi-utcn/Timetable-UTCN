@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   eventStatus, activityType, groupDisplay, roomDisplay,
-  normalizeBuilding, formatHM, localDateStr,
+  normalizeBuilding, formatHM, localDateStr, progressPct,
 } from '../lib'
 
 describe('eventStatus', () => {
@@ -31,6 +31,15 @@ describe('eventStatus', () => {
     expect(eventStatus(null, now).key).toBe('upcoming')
     expect(eventStatus({}, now).key).toBe('upcoming')
     expect(eventStatus({ start: 'garbage' }, now)).toBeTruthy()
+  })
+})
+
+describe('progressPct', () => {
+  it('returns elapsed percentage only while an event is ongoing', () => {
+    const ev = { start: '2026-06-11T09:00:00', end: '2026-06-11T11:00:00' }
+    expect(progressPct(ev, new Date('2026-06-11T10:00:00'))).toBe(50)
+    expect(progressPct(ev, new Date('2026-06-11T08:59:00'))).toBe(null)
+    expect(progressPct(ev, new Date('2026-06-11T11:01:00'))).toBe(null)
   })
 })
 

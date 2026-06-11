@@ -10,16 +10,39 @@ function readTvParam() {
   } catch (e) { return false }
 }
 
-export default function App() {
-  const [tab, setTab] = useState('schedule')
+const HeaderClock = React.memo(function HeaderClock() {
   const [currentTime, setCurrentTime] = useState(new Date())
-  const [tvMode, setTvMode] = useState(readTvParam)
 
   useEffect(() => {
-    // Regular clock tick (updates every second)
-    const tick = () => setCurrentTime(new Date())
-    const timer = setInterval(tick, 1000)
+    const timer = setInterval(() => setCurrentTime(new Date()), 1000)
+    return () => clearInterval(timer)
+  }, [])
 
+  const formatDate = (date) => date.toLocaleDateString('en-GB', {
+    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
+  })
+  const formatTime = (date) => date.toLocaleTimeString('en-GB', {
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+
+  return (
+    <div className="header-clock" aria-hidden="true">
+      <span className="time">{formatTime(currentTime)}</span>
+      <span className="date">{formatDate(currentTime)}</span>
+    </div>
+  )
+})
+
+export default function App() {
+  const [tab, setTab] = useState('schedule')
+  const [tvMode, setTvMode] = useState(readTvParam)
+  const [theme, setTheme] = useState(() => {
+    try {
+      return window.localStorage.getItem('utcn-theme') === 'dark' ? 'dark' : 'light'
+    } catch (e) { return 'light' }
+  })
+
+  useEffect(() => {
     // Schedule a precise update at the next local midnight (00:00)
     // and dispatch a `midnight` event so child components can refresh.
     let midnightTimer = null
@@ -31,7 +54,6 @@ export default function App() {
       const safeMs = msUntilMidnight > 0 && msUntilMidnight < 8.64e7 ? msUntilMidnight : 60000
 
       midnightTimer = setTimeout(() => {
-        tick()
         try { window.dispatchEvent(new Event('midnight')) } catch (e) {}
         scheduleMidnight()
       }, safeMs)
@@ -39,10 +61,16 @@ export default function App() {
     scheduleMidnight()
 
     return () => {
-      clearInterval(timer)
       if (midnightTimer) clearTimeout(midnightTimer)
     }
   }, [])
+
+  useEffect(() => {
+    const root = document.documentElement
+    if (theme === 'dark') root.setAttribute('data-theme', 'dark')
+    else root.removeAttribute('data-theme')
+    try { window.localStorage.setItem('utcn-theme', theme) } catch (e) {}
+  }, [theme])
 
   // keep TV mode in sync with the URL (back/forward navigation)
   useEffect(() => {
@@ -81,13 +109,6 @@ export default function App() {
     return <TvBoard onExit={exitTv} />
   }
 
-  const formatDate = (date) => date.toLocaleDateString('en-GB', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  })
-  const formatTime = (date) => date.toLocaleTimeString('en-GB', {
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  })
-
   return (
     <div className="app">
       <header className="header">
@@ -115,11 +136,16 @@ export default function App() {
             <button onClick={enterTv} className="nav-btn" title="Full-screen campus display mode">
               ⤢ Display
             </button>
+            <button
+              onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+              className="nav-btn icon-btn"
+              title={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
+              aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
+            >
+              {theme === 'dark' ? '☀' : '◐'}
+            </button>
           </nav>
-          <div className="header-clock" aria-hidden="true">
-            <span className="time">{formatTime(currentTime)}</span>
-            <span className="date">{formatDate(currentTime)}</span>
-          </div>
+          <HeaderClock />
         </div>
       </header>
 
@@ -129,7 +155,7 @@ export default function App() {
       </main>
 
       <footer className="footer">
-        <p>© {currentTime.getFullYear()} Technical University of Cluj-Napoca</p>
+        <p>© {new Date().getFullYear()} Technical University of Cluj-Napoca</p>
         <p>Faculty of Automation and Computer Science • Auto-refresh enabled</p>
         <p>
           <a

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
-  typeChipClass, groupDisplay, roomDisplay,
+  typeChipClass, groupDisplay, roomDisplay, progressPct,
 } from './lib'
 
 const CALENDAR_COLORS = [
@@ -13,6 +13,8 @@ const CALENDAR_COLORS = [
 // (and re-animate) every row on each state change, causing visible flicker.
 const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars }) {
   const st = eventStatus(ev, now)
+  const statusText = st.text || ({ ongoing: 'In progress', next: 'Starting soon', upcoming: 'Scheduled', finished: 'Finished' }[st.key] || 'Scheduled')
+  const pct = progressPct(ev, now)
   const type = activityType(ev)
   return (
     <div
@@ -35,7 +37,8 @@ const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars }) {
       <span className="evt-prof">{ev.professor || '—'}</span>
       <span className="evt-room">{roomDisplay(ev)}</span>
       <span className="evt-group">{groupDisplay(ev, calendars) || '—'}</span>
-      <span className={'evt-status status status-' + st.key}>{st.text}</span>
+      <span className={'evt-status status status-' + st.key}>{statusText}</span>
+      {pct !== null && <span className="evt-progress" style={{ width: `${pct}%` }} aria-hidden="true" />}
     </div>
   )
 })
@@ -354,7 +357,7 @@ export default function Schedule() {
         </div>
       )}
 
-      <div className="filters panel">
+      <div className="filters panel" aria-label="Schedule filters">
         <div className="field" style={{ flex: '2 1 220px' }}>
           <label htmlFor="schedule-search">Search</label>
           <div className="search-wrapper">
@@ -381,23 +384,27 @@ export default function Schedule() {
           </div>
         </div>
         <div className="field">
-          <label>Subject</label>
+          <label htmlFor="filter-subject">Subject</label>
           <input type="text" placeholder="e.g. Algorithms" value={filters.subject}
+            id="filter-subject"
             onChange={(e) => setFilters(f => ({ ...f, subject: e.target.value }))} />
         </div>
         <div className="field">
-          <label>Professor</label>
+          <label htmlFor="filter-professor">Professor</label>
           <input type="text" placeholder="e.g. R. Potolea" value={filters.professor}
+            id="filter-professor"
             onChange={(e) => setFilters(f => ({ ...f, professor: e.target.value }))} />
         </div>
         <div className="field">
-          <label>Room</label>
+          <label htmlFor="filter-room">Room</label>
           <input type="text" placeholder="e.g. 40" value={filters.room}
+            id="filter-room"
             onChange={(e) => setFilters(f => ({ ...f, room: e.target.value }))} />
         </div>
         <div className="field">
-          <label>Group</label>
+          <label htmlFor="filter-group">Group</label>
           <input type="text" placeholder="e.g. 30221" value={filters.group}
+            id="filter-group"
             onChange={(e) => setFilters(f => ({ ...f, group: e.target.value }))} />
         </div>
         {hasActiveFilters && (
@@ -479,7 +486,7 @@ export default function Schedule() {
           <div className="day-header">
             <h3>{formatDateHeader(date)}</h3>
             {date === todayLocal && <span className="today-tag">Today</span>}
-            {date === tomorrowLocal && <span className="today-tag" style={{ color: 'var(--utcn-sky)', borderColor: 'rgba(77,163,255,.45)' }}>Tomorrow</span>}
+            {date === tomorrowLocal && <span className="today-tag tomorrow-tag">Tomorrow</span>}
             <span className="count">{groupedByDate[date].length} classes</span>
           </div>
           <div className="evt-table">

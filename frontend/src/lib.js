@@ -102,7 +102,14 @@ export function eventStatus(ev, now = new Date()) {
     const s = new Date(ev.start)
     const e = ev.end ? new Date(ev.end) : null
     if (e && now > e) return { key: 'finished', text: 'Finished' }
-    if (now >= s) return { key: 'ongoing', text: 'In progress' }
+    if (now >= s) {
+      if (e) {
+        const left = Math.max(1, Math.round((e - now) / 60000))
+        const txt = left >= 60 ? `${Math.floor(left / 60)}h ${left % 60}m left` : `${left} min left`
+        return { key: 'ongoing', text: txt }
+      }
+      return { key: 'ongoing', text: 'In progress' }
+    }
     const mins = Math.floor((s - now) / 60000)
     if (mins <= 30) return { key: 'next', text: mins <= 1 ? 'Starting now' : `in ${mins} min` }
     if (mins < 60) return { key: 'upcoming', text: `in ${mins} min` }
@@ -112,6 +119,18 @@ export function eventStatus(ev, now = new Date()) {
   } catch (e) {
     return { key: 'upcoming', text: '' }
   }
+}
+
+/** Percentage [0..100] of an ongoing event's elapsed time, or null. */
+export function progressPct(ev, now = new Date()) {
+  if (!ev || !ev.start || !ev.end) return null
+  try {
+    const s = new Date(ev.start).getTime()
+    const e = new Date(ev.end).getTime()
+    const n = now.getTime()
+    if (!(e > s) || n < s || n > e) return null
+    return Math.round(((n - s) / (e - s)) * 100)
+  } catch (err) { return null }
 }
 
 // ── Activity type ────────────────────────────────────────────────────

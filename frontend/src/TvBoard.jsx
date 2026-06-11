@@ -2,12 +2,20 @@ import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   CANONICAL_BUILDINGS, buildingLabel, normalizeBuilding,
   formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
-  typeChipClass, groupDisplay, roomDisplay,
+  typeChipClass, groupDisplay, roomDisplay, progressPct,
 } from './lib'
 
 const REFRESH_MS = 5 * 60 * 1000   // data refresh
 const PAGE_MS = 12 * 1000          // rotate long lists
-const CARDS_PER_PAGE = 6
+
+function cardsPerTvPage() {
+  if (typeof window === 'undefined') return 5
+  const { innerWidth: w, innerHeight: h } = window
+  const stacked = w / Math.max(h, 1) < 4 / 3
+  if (stacked) return h < 1000 ? 2 : 3
+  if (h < 760) return 4
+  return 5
+}
 
 function readBuildingParam() {
   try {
@@ -20,6 +28,8 @@ function readBuildingParam() {
 // React to unmount/remount every card — which made the whole board flicker.
 const TvCard = React.memo(function TvCard({ ev, now, calendars }) {
   const st = eventStatus(ev, now)
+  const statusText = st.text || ({ ongoing: 'In progress', next: 'Starting soon', upcoming: 'Scheduled', finished: 'Finished' }[st.key] || 'Scheduled')
+  const pct = progressPct(ev, now)
   const type = activityType(ev)
   const grp = groupDisplay(ev, calendars)
   return (
@@ -37,13 +47,14 @@ const TvCard = React.memo(function TvCard({ ev, now, calendars }) {
           {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
           {grp && <span>{grp}</span>}
           {ev.professor && <span>{ev.professor}</span>}
-          <span className={'status status-' + st.key}>{st.text}</span>
+          <span className={'status status-' + st.key}>{statusText}</span>
         </div>
       </div>
       <div className="tv-card-room">
-        <div className="label">Room</div>
+        <div className="label">ROOM</div>
         <div className="room">{roomDisplay(ev)}</div>
       </div>
+      {pct !== null && <span className="evt-progress" style={{ width: `${pct}%` }} aria-hidden="true" />}
     </div>
   )
 })
@@ -66,12 +77,19 @@ export default function TvBoard({ onExit }) {
   const [now, setNow] = useState(new Date())
   const [page, setPage] = useState(0)
   const [building, setBuilding] = useState(readBuildingParam)
+  const [cardsPerPage, setCardsPerPage] = useState(cardsPerTvPage)
   const abortRef = useRef(null)
 
   // 1-second clock
   useEffect(() => {
     const t = setInterval(() => setNow(new Date()), 1000)
     return () => clearInterval(t)
+  }, [])
+
+  useEffect(() => {
+    const onResize = () => setCardsPerPage(cardsPerTvPage())
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
   }, [])
 
   const fetchData = useCallback(async () => {
@@ -173,10 +191,10 @@ export default function TvBoard({ onExit }) {
   }, [calendars, nowEvents, building])
 
   const paginate = (list) => {
-    if (list.length <= CARDS_PER_PAGE) return { items: list, pages: 1, current: 0 }
-    const pages = Math.ceil(list.length / CARDS_PER_PAGE)
+    if (list.length <= cardsPerPage) return { items: list, pages: 1, current: 0 }
+    const pages = Math.ceil(list.length / cardsPerPage)
     const current = page % pages
-    return { items: list.slice(current * CARDS_PER_PAGE, (current + 1) * CARDS_PER_PAGE), pages, current }
+    return { items: list.slice(current * cardsPerPage, (current + 1) * cardsPerPage), pages, current }
   }
 
   const nowPage = paginate(nowEvents)
@@ -233,7 +251,8 @@ export default function TvBoard({ onExit }) {
           <section className="tv-col" aria-label="Classes in progress">
             <div className="tv-section-title now-title">
               <span className="live-dot" aria-hidden="true" />
-              Now in progress
+              <span className="section-kicker">NOW</span>
+              <span>In progress</span>
               <span className="count">
                 {nowEvents.length}{nowPage.pages > 1 ? ` • ${nowPage.current + 1}/${nowPage.pages}` : ''}
               </span>
@@ -250,7 +269,9 @@ export default function TvBoard({ onExit }) {
 
           <section className="tv-col" aria-label="Upcoming classes">
             <div className="tv-section-title next-title">
-              Coming up today
+              <span className="live-dot" aria-hidden="true" />
+              <span className="section-kicker">NEXT</span>
+              <span>Coming up today</span>
               <span className="count">
                 {nextEvents.length}{nextPage.pages > 1 ? ` • ${nextPage.current + 1}/${nextPage.pages}` : ''}
               </span>
@@ -270,7 +291,7 @@ export default function TvBoard({ onExit }) {
       <footer className="tv-footer">
         {freeRooms && freeRooms.length > 0 && (
           <div className="free-rooms">
-            <span>Free rooms now ({freeRooms.length}):</span>
+            <span className="free-rooms-label">FREE ROOMS NOW ({freeRooms.length})</span>
             {freeRooms.slice(0, 14).map(r => (
               <span key={r} className="free-room-pill">{r}</span>
             ))}
