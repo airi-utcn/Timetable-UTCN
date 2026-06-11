@@ -563,6 +563,25 @@ input, select { font-family: inherit; }
   border-radius: var(--radius-sm); padding: 6px 18px;
   background: var(--surface);
 }
+.tv-building-field {
+  min-width: min(320px, 28vw);
+  flex: 0 1 320px;
+}
+.tv-building-field label {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+}
+.tv-building-field select {
+  width: 100%;
+  min-width: 0;
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border-2);
+  font-size: 1rem;
+  font-weight: 650;
+  text-transform: uppercase;
+}
 
 .tv-body { flex: 1; display: grid; grid-template-columns: 1.15fr 1fr; gap: 20px; min-height: 0; }
 @media (max-aspect-ratio: 4/3) { .tv-body { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; } }

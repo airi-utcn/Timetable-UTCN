@@ -218,21 +218,20 @@ export default function TvBoard({ onExit }) {
             <div className="sub">Technical University of Cluj-Napoca</div>
           </div>
         </div>
-        {building && <div className="tv-building">{buildingLabel(building)}</div>}
-        {!building && (
-          <div className="field">
-            <select
-              value={building}
-              onChange={e => setBuilding(e.target.value)}
-              aria-label="Select building"
-            >
-              <option value="">All buildings</option>
-              {CANONICAL_BUILDINGS.map(b => (
-                <option key={b} value={b}>{buildingLabel(b)}</option>
-              ))}
-            </select>
-          </div>
-        )}
+        <div className="field tv-building-field">
+          <label htmlFor="tv-building-select">BUILDING</label>
+          <select
+            id="tv-building-select"
+            value={building}
+            onChange={e => setBuilding(e.target.value)}
+            aria-label="Select building"
+          >
+            <option value="">All buildings</option>
+            {CANONICAL_BUILDINGS.map(b => (
+              <option key={b} value={b}>{buildingLabel(b)}</option>
+            ))}
+          </select>
+        </div>
         <div className="tv-clock">
           <div className="time">{timeStr}<span className="sec">:{secStr}</span></div>
           <div className="date">{dateStr}</div>
