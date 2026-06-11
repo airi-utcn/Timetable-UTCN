@@ -611,8 +611,8 @@ def index():
         assets_dir = frontend_dist.parent / 'assets'
         if assets_dir.is_dir():
             def _fix_asset_ref(m):
-                """Replace a stale /frontend/assets/xxx-HASH.ext ref with the actual file."""
-                full = m.group(0)       # e.g. /frontend/assets/index-OLD.css
+                """Replace a stale /assets/xxx-HASH.ext ref with the actual file."""
+                full = m.group(0)       # e.g. /assets/index-OLD.css
                 fname = m.group(1)      # e.g. index-OLD.css
                 fpath = assets_dir / fname
                 if fpath.is_file():
@@ -629,10 +629,10 @@ def index():
                 if len(segs) == 2:
                     prefix = segs[0]
                 for p in sorted(assets_dir.glob(f'{prefix}-*.{ext}')):
-                    return f'/frontend/assets/{p.name}'
+                    return f'/assets/{p.name}'
                 return full  # give up, return original
             content = _re.sub(
-                r'/frontend/assets/([a-zA-Z0-9_-]+\.[a-z]+)',
+                r'/assets/([a-zA-Z0-9_-]+\.[a-z]+)',
                 _fix_asset_ref,
                 content,
             )
@@ -673,6 +673,16 @@ def index():
 def spa_index_legacy():
     """Redirect /app to root for backwards compatibility."""
     return redirect('/')
+
+
+@app.route('/frontend')
+@app.route('/frontend/')
+def frontend_root_legacy():
+    """Redirect the old frontend mount to the root SPA path."""
+    suffix = ''
+    if request.query_string:
+        suffix = '?' + request.query_string.decode('utf-8', errors='ignore')
+    return redirect('/' + suffix, code=301)
 
 
 # OLD FRONTEND ROUTE - DISABLED (use /app for React SPA)
@@ -3335,13 +3345,6 @@ def departures_view():
 # ADMIN ROUTES (Password Protected)
 # =============================================================================
 
-@app.route('/admin')
-@require_admin
-def admin_view():
-    """Admin page for managing calendar imports and events - React version."""
-    return render_template('admin_react.html')
-
-
 @app.route('/admin/cleanup_old_events', methods=['POST'])
 @require_admin
 def admin_cleanup_old_events():
@@ -3645,7 +3648,7 @@ def admin_set_calendar_url():
     if not url:
         if wants_json:
             return jsonify({'success': False, 'error': 'URL is required'}), 400
-        return redirect(url_for('admin_view'))
+        return redirect(url_for('admin_index'))
 
     # Ensure DB initialized and save calendar
     calendar_id = None
@@ -3692,7 +3695,7 @@ def admin_set_calendar_url():
             'message': 'Calendar added and import started' if import_started else 'Calendar added (import already in progress)'
         })
     
-    return redirect(url_for('admin_view'))
+    return redirect(url_for('admin_index'))
 
 
 @app.route('/admin/upload_rooms_publisher', methods=['POST'])
@@ -4570,8 +4573,8 @@ def delete_extracurricular_event():
 # React SPA frontend routes
 # ─────────────────────────────────────────────────────────────────────────────
 
-@app.route('/frontend/<path:filename>')
-def frontend_static(filename):
+@app.route('/assets/<path:filename>')
+def frontend_assets(filename):
     """Serve built frontend assets from frontend/dist.
 
     Uses send_from_directory (sets correct MIME types and handles path
@@ -4579,16 +4582,15 @@ def frontend_static(filename):
     change content hashes) we fall back to any same-kind file under the
     assets/ subdirectory so stale browser caches still get CSS/JS.
     """
-    frontend_dist = pathlib.Path(__file__).parent / 'frontend' / 'dist'
+    assets_dir = pathlib.Path(__file__).parent / 'frontend' / 'dist' / 'assets'
 
     # 1. Try exact file
-    target = frontend_dist / filename
+    target = assets_dir / filename
     if target.is_file():
-        return send_from_directory(str(frontend_dist), filename)
+        return send_from_directory(str(assets_dir), filename)
 
     # 2. Hash-mismatch fallback: map stale asset name to current one
     name = pathlib.Path(filename).name
-    assets_dir = frontend_dist / 'assets'
     if assets_dir.is_dir():
         if name.endswith('.css'):
             for p in assets_dir.glob('index-*.css'):
@@ -4602,12 +4604,22 @@ def frontend_static(filename):
             for p in assets_dir.glob('index-*.js'):
                 return send_from_directory(str(assets_dir), p.name)
 
-    # 3. SPA fallback — return index.html so client-side routing works
-    idx = frontend_dist / 'index.html'
-    if idx.is_file():
-        return send_from_directory(str(frontend_dist), 'index.html')
-
     return "Not found", 404
+
+
+@app.route('/frontend/assets/<path:filename>')
+def frontend_assets_legacy(filename):
+    """Serve old /frontend/assets URLs for cached clients after the root move."""
+    return frontend_assets(filename)
+
+
+@app.route('/frontend/<path:filename>')
+def frontend_path_legacy(filename):
+    """Redirect old SPA paths under /frontend to root."""
+    suffix = ''
+    if request.query_string:
+        suffix = '?' + request.query_string.decode('utf-8', errors='ignore')
+    return redirect('/' + suffix, code=301)
 
 
 @app.route('/departures.json')

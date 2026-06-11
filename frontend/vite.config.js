@@ -1,15 +1,18 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+const backendTarget = process.env.VITE_BACKEND_URL || 'http://127.0.0.1:5000'
+
 export default defineConfig({
   plugins: [react()],
-  base: '/frontend/',
+  base: '/',
   server: {
     proxy: {
-      '/events.json': 'http://127.0.0.1:5000',
-      '/departures.json': 'http://127.0.0.1:5000',
-      '/generate_events': 'http://127.0.0.1:5000',
-      '/generate_status': 'http://127.0.0.1:5000',
+      '/events.json': backendTarget,
+      '/departures.json': backendTarget,
+      '/calendars.json': backendTarget,
+      '/generate_events': backendTarget,
+      '/generate_status': backendTarget,
     }
   },
   build: {

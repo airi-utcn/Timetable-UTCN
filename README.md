@@ -309,7 +309,7 @@ npm run dev -- --host 127.0.0.1
 The frontend dev server usually runs at:
 
 ```text
-http://127.0.0.1:5173/frontend/
+http://127.0.0.1:5173/
 ```
 
 During development, Vite proxies backend API calls to Flask.
@@ -463,7 +463,7 @@ npm run build
 
 After starting backend and frontend:
 
-1. Open `http://127.0.0.1:5173/frontend/`.
+1. Open `http://127.0.0.1:5173/`.
 2. Verify the Schedule view loads real rows from `/events.json`.
 3. Try search and filters.
 4. Switch to Live.

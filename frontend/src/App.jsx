@@ -43,6 +43,14 @@ export default function App() {
   })
 
   useEffect(() => {
+    try {
+      if (window.location.pathname === '/frontend' || window.location.pathname === '/frontend/') {
+        window.history.replaceState({}, '', '/' + window.location.search + window.location.hash)
+      }
+    } catch (e) {}
+  }, [])
+
+  useEffect(() => {
     // Schedule a precise update at the next local midnight (00:00)
     // and dispatch a `midnight` event so child components can refresh.
     let midnightTimer = null

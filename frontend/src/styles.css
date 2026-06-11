@@ -415,7 +415,8 @@ input, select { font-family: inherit; }
   border-left-color: var(--ok);
   background: linear-gradient(90deg, color-mix(in srgb, var(--ok) 7%, var(--surface)) 0%, var(--surface) 42%);
 }
-.evt-row.is-finished { opacity: .45; }
+.evt-row.is-finished { opacity: 1; }
+.evt-row.is-finished .evt-status { color: var(--text-dim); }
 
 /* live progress track along the bottom of ongoing rows */
 .evt-progress {

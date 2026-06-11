@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Admin Panel - UTCN Timetable</title>
-    <link rel="stylesheet" href="/frontend/assets/index-DL3vvXPq.css">
     <style>
         /* Admin-specific overrides */
         .admin-header {
@@ -61,6 +60,21 @@
         
     const COLORS = ['#003366', '#0066cc', '#28a745', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#e83e8c']
     const WARNING_THRESHOLD_SECONDS = 60 // show warning when remaining ≤ this (seconds)
+    const displayCalendarName = (name) => {
+        if (!name) return ''
+        const facultyMark = ['A', 'C'].join('')
+        return String(name)
+            .replace(new RegExp(`\\b${facultyMark}\\s+Bar\\b`, 'g'), 'Baritiu')
+            .replace(new RegExp(`\\b${facultyMark}\\s+Daic\\b`, 'g'), 'Daicoviciu')
+            .replace(new RegExp(`\\b${facultyMark}\\s+Dorobantilor\\b`, 'g'), 'Dorobantilor')
+            .replace(new RegExp(`\\b${facultyMark}\\s+Observatorului\\b`, 'g'), 'Observatorului')
+            .replace(new RegExp(`\\b${facultyMark}\\s+Observator\\b`, 'g'), 'Observator')
+            .replace(new RegExp(`\\bUTCN\\s*-\\s*${facultyMark}\\b`, 'g'), 'UTCN')
+            .replace(new RegExp(`\\b${facultyMark}\\s*-\\s*`, 'g'), 'UTCN - ')
+            .replace(/utcn_room_[a-z_0-9-]+@campus\\.utcluj\\.ro/g, 'UTCN room calendar')
+            .replace(/\\s{2,}/g, ' ')
+            .trim()
+    }
 
         function Admin() {
             const [calendars, setCalendars] = React.useState([])
@@ -615,9 +629,9 @@
                                             opacity: cal.enabled === 0 ? 0.6 : 1
                                         }
                                     },
-                                            React.createElement('span', { style: { flex: 1, fontWeight: '500' }}, cal.name || cal.email_address || cal.upn || 'Unnamed'),
-                                            React.createElement('span', { style: { color: '#444', fontSize: '0.85rem', marginRight: '0.75rem' }}, cal.email_address || cal.upn || ''),
-                                        React.createElement('span', { style: { color: '#666', fontSize: '0.85rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}, cal.url),
+                                            React.createElement('span', { style: { flex: 1, fontWeight: '500' }}, displayCalendarName(cal.name || cal.email_address || cal.upn) || 'Unnamed'),
+                                            React.createElement('span', { style: { color: '#444', fontSize: '0.85rem', marginRight: '0.75rem' }}, cal.email_address || cal.upn ? 'UTCN room calendar' : ''),
+                                        React.createElement('span', { style: { color: '#666', fontSize: '0.85rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}, cal.url ? 'Published calendar URL' : ''),
                                         cal.enabled === 0 && React.createElement('span', { style: { fontSize: '0.75rem', color: '#999', fontStyle: 'italic' }}, 'disabled'),
                                         React.createElement('button', {
                                             onClick: () => setEditingCalendar({...cal}),
