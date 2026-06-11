@@ -15,13 +15,13 @@ from datetime import datetime  # noqa: E402
 # ── room_from_sala_name (publisher CSV Nume_Sala column) ──────────────
 
 def test_numeric_room_40():
-    assert room_from_sala_name("UTCN - AC Bar - Sala 40") == "40"
+    assert room_from_sala_name("UTCN - Baritiu - Sala 40") == "40"
 
 
 def test_alphanumeric_rooms():
-    assert room_from_sala_name("UTCN - AC Bar - Sala BT 503") == "BT 503"
-    assert room_from_sala_name("UTCN - AC Bar - Sala P03") == "P03"
-    assert room_from_sala_name("UTCN - AC Bar - Sala 26B") == "26B"
+    assert room_from_sala_name("UTCN - Baritiu - Sala BT 503") == "BT 503"
+    assert room_from_sala_name("UTCN - Baritiu - Sala P03") == "P03"
+    assert room_from_sala_name("UTCN - Baritiu - Sala 26B") == "26B"
 
 
 def test_special_rooms():
@@ -35,15 +35,15 @@ def test_empty_and_none():
 
 
 def test_site_extraction():
-    assert site_from_sala_name("UTCN - AC Bar - Sala 40") == "AC Bar"
+    assert site_from_sala_name("UTCN - Baritiu - Sala 40") == "Baritiu"
 
 
 # ── resolve_room priority ──────────────────────────────────────────────
 
 CAL_MAP = {
-    'abc12345': {'name': 'UTCN - AC Bar - Sala 40', 'room': '40',
+    'abc12345': {'name': 'UTCN - Baritiu - Sala 40', 'room': '40',
                  'building': 'UTCN BARITIU ELECTRO CLUJ'},
-    'def67890': {'name': 'UTCN - AC Daic - Sala 479', 'room': None,
+    'def67890': {'name': 'UTCN - Daicoviciu - Sala 479', 'room': None,
                  'building': None},
 }
 
@@ -60,7 +60,7 @@ def test_room_derived_from_calendar_name():
 
 
 def test_room_falls_back_to_location():
-    room, _ = resolve_room('unknown', 'UTCN - AC Bar - Sala 26B', CAL_MAP)
+    room, _ = resolve_room('unknown', 'UTCN - Baritiu - Sala 26B', CAL_MAP)
     assert room == '26B'
 
 

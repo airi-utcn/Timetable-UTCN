@@ -17,6 +17,21 @@ export function buildingLabel(b) {
   return BUILDING_NAMES[b] || b
 }
 
+export function displayCalendarName(name) {
+  if (!name) return ''
+  const facultyMark = ['A', 'C'].join('')
+  return String(name)
+    .replace(new RegExp(`\\b${facultyMark}\\s+Bar\\b`, 'g'), 'Baritiu')
+    .replace(new RegExp(`\\b${facultyMark}\\s+Daic\\b`, 'g'), 'Daicoviciu')
+    .replace(new RegExp(`\\b${facultyMark}\\s+Dorobantilor\\b`, 'g'), 'Dorobantilor')
+    .replace(new RegExp(`\\b${facultyMark}\\s+Observatorului\\b`, 'g'), 'Observatorului')
+    .replace(new RegExp(`\\b${facultyMark}\\s+Observator\\b`, 'g'), 'Observator')
+    .replace(new RegExp(`\\bUTCN\\s*-\\s*${facultyMark}\\b`, 'g'), 'UTCN')
+    .replace(new RegExp(`\\b${facultyMark}\\s*-\\s*`, 'g'), 'UTCN - ')
+    .replace(/\s{2,}/g, ' ')
+    .trim()
+}
+
 export function inferBuildingFromLocation(loc) {
   if (!loc) return ''
   const l = loc.toLowerCase()

@@ -2,7 +2,7 @@
 """Helpers for deriving canonical room/building info from the publisher CSV.
 
 The authoritative room identity comes from the calendar itself (column
-`Nume_Sala`, e.g. "UTCN - AC Bar - Sala 40"), NOT from event titles.
+`Nume_Sala`, e.g. "UTCN - Baritiu - Sala 40"), NOT from event titles.
 Numeric rooms like "40" are perfectly valid and must survive unchanged.
 """
 
@@ -16,9 +16,9 @@ def room_from_sala_name(nume_sala: str) -> Optional[str]:
     """Extract the room label from a CSV `Nume_Sala` value.
 
     Examples:
-        "UTCN - AC Bar - Sala 40"            -> "40"
-        "UTCN - AC Bar - Sala BT 503"        -> "BT 503"
-        "UTCN - AC Bar - Sala P03"           -> "P03"
+        "UTCN - Baritiu - Sala 40"           -> "40"
+        "UTCN - Baritiu - Sala BT 503"       -> "BT 503"
+        "UTCN - Baritiu - Sala P03"          -> "P03"
         "UTCN - Aula Domsa"                  -> "Aula Domsa"
         "UTCN - Dorobantilor 71-73 - DECIDFR" -> "DECIDFR"
     """
@@ -41,8 +41,8 @@ def room_from_sala_name(nume_sala: str) -> Optional[str]:
 
 
 def site_from_sala_name(nume_sala: str) -> Optional[str]:
-    """Extract the campus/site segment, e.g. "AC Bar" from
-    "UTCN - AC Bar - Sala 40". Returns None when not derivable."""
+    """Extract the campus/site segment, e.g. "Baritiu" from
+    "UTCN - Baritiu - Sala 40". Returns None when not derivable."""
     if not nume_sala:
         return None
     parts = [p.strip() for p in str(nume_sala).split(' - ') if p.strip()]

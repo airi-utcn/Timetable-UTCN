@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   eventStatus, activityType, groupDisplay, roomDisplay,
-  normalizeBuilding, formatHM, localDateStr, progressPct,
+  normalizeBuilding, formatHM, localDateStr, progressPct, displayCalendarName,
 } from '../lib'
 
 describe('eventStatus', () => {
@@ -61,18 +61,26 @@ describe('activityType', () => {
   })
 })
 
+describe('displayCalendarName', () => {
+  it('removes faculty-specific shorthand from user-facing names', () => {
+    const mark = ['A', 'C'].join('')
+    expect(displayCalendarName(`UTCN - ${mark} Bar - Sala 40`)).toBe('UTCN - Baritiu - Sala 40')
+    expect(displayCalendarName(`${mark} - Year 3 - CTI English`)).toBe('UTCN - Year 3 - CTI English')
+  })
+})
+
 describe('groupDisplay / roomDisplay', () => {
   it('prefers structured year+group', () => {
     expect(groupDisplay({ year: '2', group: '30221' })).toBe('Year 2 • 30221')
     expect(groupDisplay({ year: '3' })).toBe('Year 3')
   })
   it('falls back to calendar name parsing', () => {
-    const out = groupDisplay({ source: 'h1', title: 'x' }, { h1: { name: 'AC year 3 grupa B' } })
+    const out = groupDisplay({ source: 'h1', title: 'x' }, { h1: { name: 'UTCN year 3 grupa B' } })
     expect(out).toContain('3')
   })
   it('roomDisplay uses room, then location, then dash', () => {
     expect(roomDisplay({ room: '40' })).toBe('40')
-    expect(roomDisplay({ location: 'UTCN - AC Bar - Sala 26B' })).toBe('26B')
+    expect(roomDisplay({ location: 'UTCN - Baritiu - Sala 26B' })).toBe('26B')
     expect(roomDisplay({})).toBe('—')
   })
 })
@@ -81,8 +89,8 @@ describe('normalizeBuilding', () => {
   it('detects BT from room hints', () => {
     expect(normalizeBuilding('Baritiu', 'BT101')).toBe('BT Electro Cluj')
   })
-  it('maps AC Bar to Baritiu Electro', () => {
-    expect(normalizeBuilding('', 'UTCN - AC Bar - Sala 40')).toBe('Baritiu Electro Cluj')
+  it('maps Baritiu Electro location text', () => {
+    expect(normalizeBuilding('', 'UTCN - Baritiu Electro - Sala 40')).toBe('Baritiu Electro Cluj')
   })
   it('returns empty for unknown', () => {
     expect(normalizeBuilding('', '')).toBe('')

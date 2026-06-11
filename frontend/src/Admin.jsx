@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react'
+import { displayCalendarName } from './lib'
 
 const COLORS = ['#003366', '#0066cc', '#28a745', '#dc3545', '#fd7e14', '#6f42c1', '#20c997', '#e83e8c']
 
@@ -255,9 +256,9 @@ export default function Admin() {
                           </form>
                         ) : (
                           <>
-                            <strong>{cal.name || cal.email_address || 'Calendar ' + (idx + 1)}</strong>
+                            <strong>{displayCalendarName(cal.name) || cal.email_address || 'Calendar ' + (idx + 1)}</strong>
                             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-                              <small style={{ color: '#444' }}>{cal.name || cal.email_address || cal.upn || ''}</small>
+                              <small style={{ color: '#444' }}>{displayCalendarName(cal.name) || cal.email_address || cal.upn || ''}</small>
                               <small style={{ color: '#666' }}>{cal.url ? cal.url.substring(0, 50) + '...' : ''}</small>
                             </div>
                           </>

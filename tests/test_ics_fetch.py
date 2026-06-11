@@ -30,14 +30,14 @@ def test_simple_event_parsed():
         "DTSTART:20260611T080000\r\n"
         "DTEND:20260611T100000\r\n"
         "SUMMARY:Algorithms (laboratory) 2nd year/30221 R. Potolea\r\n"
-        "LOCATION:UTCN - AC Bar - Sala 40\r\n"
+        "LOCATION:UTCN - Baritiu - Sala 40\r\n"
         "END:VEVENT\r\n"
     )
     evs = parse_ics_text(ics, date(2026, 6, 1), date(2026, 6, 30))
     assert len(evs) == 1
     assert evs[0]['title'].startswith('Algorithms')
     assert evs[0]['start'] == '2026-06-11T08:00:00'
-    assert evs[0]['location'] == 'UTCN - AC Bar - Sala 40'
+    assert evs[0]['location'] == 'UTCN - Baritiu - Sala 40'
 
 
 def test_recurring_weekly_event_expanded():

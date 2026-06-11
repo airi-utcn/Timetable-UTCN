@@ -144,7 +144,7 @@ def parse_location_text(text: str) -> Dict[str, str]:
     """Parsează locația din format text.
     
     Exemple:
-        "UTCN - AC Bar - Sala BT 503" -> {'building': 'Baritiu', 'room': 'BT503'}
+        "UTCN - Baritiu - Sala BT 503" -> {'building': 'Baritiu', 'room': 'BT503'}
         "Sala 479 DAIC" -> {'building': 'DAIC', 'room': '479'}
     """
     result = {'building': '', 'room': '', 'room_code': ''}
@@ -551,7 +551,7 @@ if __name__ == '__main__':
         "utcn_room_ac_bar_bt-503@campus.utcluj.ro",
         "utcn_room_ac_daic_479@campus.utcluj.ro",
         "utcn_room_ac_bar_26b@campus.utcluj.ro",
-        "UTCN - AC Bar - Sala BT 503",
+        "UTCN - Baritiu - Sala BT 503",
     ]
     
     print("=== TITLURI ===")

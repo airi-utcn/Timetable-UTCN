@@ -64,8 +64,8 @@ describe('TvBoard with data', () => {
       if (String(url).includes('/events.json')) return okJson(events)
       if (String(url).includes('/calendars.json')) {
         return okJson({
-          h1: { name: 'UTCN - AC Bar - Sala 40', room: '40' },
-          h2: { name: 'UTCN - AC Bar - Sala P03', room: 'P03' },
+          h1: { name: 'UTCN - Baritiu - Sala 40', room: '40' },
+          h2: { name: 'UTCN - Baritiu - Sala P03', room: 'P03' },
         })
       }
       return okJson({})

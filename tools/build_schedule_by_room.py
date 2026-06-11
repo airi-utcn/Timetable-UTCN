@@ -84,7 +84,7 @@ def resolve_room(source: str | None, location: str | None,
     Priority (per spec — the room must come from the room calendar the event
     was fetched from, never from free text in the title):
       1. calendar_map[source].room (populated from the publisher CSV)
-      2. room derived from calendar_map[source].name ("UTCN - AC Bar - Sala 40")
+      2. room derived from calendar_map[source].name ("UTCN - Baritiu - Sala 40")
       3. room parsed from the event's location field
     """
     meta = calendar_map.get(source or '') or {}

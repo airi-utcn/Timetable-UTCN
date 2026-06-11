@@ -3,7 +3,7 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Admin Panel - UTCN AC Timetable</title>
+    <title>Admin Panel - UTCN Timetable</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         
@@ -257,7 +257,7 @@
     <div class="header">
         <div class="header-top">
             <span>Technical University of Cluj-Napoca</span>
-            <span>Faculty of Automation and Computer Science</span>
+            <span>UTCN timetable system</span>
         </div>
         <div class="header-main">
             <div>
@@ -307,7 +307,7 @@
                                value="{{ calendar_url }}"
                                placeholder="https://outlook.office365.com/owa/calendar/...">
                         <p class="help-text">Optional: give this calendar a friendly name</p>
-                        <input type="text" id="calendar_name" name="calendar_name" placeholder="e.g., AC - Year 3 - CTI English or utcn_room_airi_obs_204@campus.utcluj.ro" value="{{ calendar_name }}">
+                        <input type="text" id="calendar_name" name="calendar_name" placeholder="e.g., UTCN - Year 3 - CTI English or utcn_room_airi_obs_204@campus.utcluj.ro" value="{{ calendar_name }}">
                         <p class="help-text">Optional: choose a color to represent this calendar in the UI</p>
                         <input type="color" id="calendar_color" name="calendar_color" value="{{ calendar_color or '#0066cc' }}">
                         <p class="help-text">Enter the complete URL of the published Outlook calendar</p>

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Admin Panel - UTCN AC Timetable</title>
+    <title>Admin Panel - UTCN Timetable</title>
     <link rel="stylesheet" href="/frontend/assets/index-DL3vvXPq.css">
     <style>
         /* Admin-specific overrides */
@@ -514,7 +514,7 @@
                         }),
                         React.createElement('input', {
                             type: 'text',
-                            placeholder: 'e.g., AC - Year 3 - CTI English (or utcn_room_airi_obs_204@...)',
+                            placeholder: 'e.g., UTCN - Year 3 - CTI English (or utcn_room_airi_obs_204@...)',
                             value: newCalendar.name,
                             onChange: (e) => setNewCalendar({...newCalendar, name: e.target.value}),
                             style: { width: '220px', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }
@@ -572,7 +572,7 @@
                                     },
                                         React.createElement('input', {
                                             type: 'text',
-                                            placeholder: 'e.g., AC - Year 3 - CTI English',
+                                            placeholder: 'e.g., UTCN - Year 3 - CTI English',
                                             value: editingCalendar.name || '',
                                             onChange: (e) => setEditingCalendar({...editingCalendar, name: e.target.value}),
                                             style: { flex: '1', minWidth: '150px', padding: '0.4rem', border: '1px solid #90caf9', borderRadius: '4px' }

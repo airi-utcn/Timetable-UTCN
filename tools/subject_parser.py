@@ -646,7 +646,7 @@ def parse_location(location: str) -> ParsedLocation:
     Formate suportate:
         - utcn_room_ac_doro_107@campus.utcluj.ro -> Dorobanților, Sala 107
         - utcn_room_ac_bar_bt-503@campus.utcluj.ro -> Barițiu, Sala BT5.03
-        - UTCN - AC Bar - Sala BT 503 -> Barițiu, Sala BT5.03
+        - UTCN - Baritiu - Sala BT 503 -> Barițiu, Sala BT5.03
     """
     if not location:
         return ParsedLocation(original="", display_name="Unknown")
@@ -673,7 +673,7 @@ def parse_location(location: str) -> ParsedLocation:
         # Try to match the faculty code token(s) right after "UTCN -"
         # This handles: "UTCN - ETTI Observatorului 2 - Sala 402"
         #               "UTCN - EXT AB Al. I. Cuza 23 - Sala A2"
-        #               "UTCN - AC Bar - Sala BT 503"
+        #               "UTCN - Baritiu - Sala BT 503"
         match2 = re.match(
             r'UTCN\s*-\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)\b',
             loc, re.IGNORECASE
@@ -814,10 +814,9 @@ if __name__ == '__main__':
         "utcn_room_ac_bar_bt-503@campus.utcluj.ro",
         "utcn_room_ac_daic_479@campus.utcluj.ro",
         "utcn_room_ac_bar_s42@campus.utcluj.ro",
-        "UTCN - AC Bar - Sala BT 503",
+        "UTCN - Baritiu - Sala BT 503",
     ]
     for loc in test_locations:
         parsed = parse_location(loc)
         print(f"  {loc}")
         print(f"    -> {parsed.display_name} (building: {parsed.building_code})")
-

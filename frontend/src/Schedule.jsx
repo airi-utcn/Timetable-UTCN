@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
-  typeChipClass, groupDisplay, roomDisplay, progressPct,
+  typeChipClass, groupDisplay, roomDisplay, progressPct, displayCalendarName,
 } from './lib'
 
 const CALENDAR_COLORS = [
@@ -259,7 +259,8 @@ export default function Schedule() {
       const title = ev.display_title || ev.title || ''
       if (!lowerQuery || title.toLowerCase().includes(lowerQuery)) titleSet.add(title)
       const calName = ev.calendar_name || calendars[ev.source]?.name || ''
-      if (calName && (!lowerQuery || calName.toLowerCase().includes(lowerQuery))) titleSet.add(calName)
+      const displayName = displayCalendarName(calName)
+      if (displayName && (!lowerQuery || `${displayName} ${calName}`.toLowerCase().includes(lowerQuery))) titleSet.add(displayName)
     })
     setSearchSuggestions([...titleSet].sort().slice(0, 10))
   }, [allEvents, calendars])
@@ -288,7 +289,7 @@ export default function Schedule() {
         ev.display_title || ev.title || '',
         ev.room || ev.location || '',
         ev.professor || '',
-        ev.calendar_name || calendars[source]?.name || '',
+        displayCalendarName(ev.calendar_name || calendars[source]?.name || ''),
       ].join(' ').toLowerCase()
       if (!hay.includes(q)) return false
     }
@@ -430,16 +431,16 @@ export default function Schedule() {
           />
           <div className="legend-list">
             {Object.entries(calendars)
-              .filter(([, cal]) => !calendarSearch || cal.name.toLowerCase().includes(calendarSearch.toLowerCase()))
+              .filter(([, cal]) => !calendarSearch || `${displayCalendarName(cal.name)} ${cal.name}`.toLowerCase().includes(calendarSearch.toLowerCase()))
               .map(([source, cal]) => (
-                <label key={source} className="legend-item" title={cal.name}>
+                <label key={source} className="legend-item" title={displayCalendarName(cal.name)}>
                   <input
                     type="checkbox"
                     checked={enabledCalendars[source] !== false}
                     onChange={() => toggleCalendar(source)}
                   />
                   <span className="legend-dot" style={{ backgroundColor: cal.color }}></span>
-                  <span>{cal.name}</span>
+                  <span>{displayCalendarName(cal.name)}</span>
                 </label>
               ))}
           </div>

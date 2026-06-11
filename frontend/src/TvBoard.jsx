@@ -212,7 +212,7 @@ export default function TvBoard({ onExit }) {
 
       <header className="tv-header">
         <div className="tv-brand">
-          <div className="brand-mark" aria-hidden="true">AC</div>
+          <div className="brand-mark" aria-hidden="true">UT</div>
           <div>
             <h1>UTCN Timetable</h1>
             <div className="sub">Technical University of Cluj-Napoca</div>

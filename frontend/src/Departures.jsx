@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useMemo } from 'react'
 import {
   CANONICAL_BUILDINGS, buildingLabel, normalizeBuilding,
   formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
-  typeChipClass, groupDisplay, roomDisplay,
+  typeChipClass, groupDisplay, roomDisplay, displayCalendarName,
 } from './lib'
 
 const SLIDE_MS = 10000
@@ -26,7 +26,7 @@ const BoardRow = React.memo(function BoardRow({ ev, now, calendarsMap }) {
         <span className="evt-title">{ev.display_title || ev.title}</span>
         <span className="evt-sub">
           {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
-          {ev.calendar_name && <span className="meta">{ev.calendar_name}</span>}
+          {ev.calendar_name && <span className="meta">{displayCalendarName(ev.calendar_name)}</span>}
         </span>
       </div>
       <span className="evt-prof">{ev.professor || '—'}</span>

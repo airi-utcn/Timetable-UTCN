@@ -1,4 +1,4 @@
-# AC UTCN Timetable Viewer
+# UTCN Timetable Viewer
 # Multi-stage build for optimized production image
 # Tuned for 32 GB RAM / 16 vCPU
 

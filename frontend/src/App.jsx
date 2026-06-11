@@ -114,7 +114,7 @@ export default function App() {
       <header className="header">
         <div className="header-content">
           <div className="brand">
-            <div className="brand-mark" aria-hidden="true">AC</div>
+            <div className="brand-mark" aria-hidden="true">UT</div>
             <div className="brand-text">
               <h1>UTCN Timetable</h1>
               <span className="sub">Technical University of Cluj-Napoca</span>
@@ -156,7 +156,7 @@ export default function App() {
 
       <footer className="footer">
         <p>© {new Date().getFullYear()} Technical University of Cluj-Napoca</p>
-        <p>Faculty of Automation and Computer Science • Auto-refresh enabled</p>
+        <p>UTCN timetable system • Auto-refresh enabled</p>
         <p>
           <a
             href="https://didatec-my.sharepoint.com/:b:/g/personal/norina_herki_campus_utcluj_ro/IQDRjcNWter3T5KD0Zd1XehiASHSf3nUyD4tArZ-O5VmfpE?e=KeJetN"
