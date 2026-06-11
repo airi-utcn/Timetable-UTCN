@@ -7,6 +7,56 @@ import {
 
 const SLIDE_MS = 10000
 
+// Module-scope row components: defining them inside Departures would create a
+// new component type on every render, remounting (and re-animating) all rows
+// each time state changes — the cause of the visible flicker.
+const BoardRow = React.memo(function BoardRow({ ev, now, calendarsMap }) {
+  const st = eventStatus(ev, now)
+  const type = activityType(ev)
+  return (
+    <div
+      className={'evt-row' + (st.key === 'ongoing' ? ' is-ongoing' : '') + (st.key === 'finished' ? ' is-finished' : '')}
+      style={{ '--row-accent': ev.color || 'var(--accent)' }}
+    >
+      <div className="evt-time">
+        <span className="start">{formatHM(ev.start)}</span>
+        <span className="end">{ev.end ? formatHM(ev.end) : ''}</span>
+      </div>
+      <div className="evt-main">
+        <span className="evt-title">{ev.display_title || ev.title}</span>
+        <span className="evt-sub">
+          {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
+          {ev.calendar_name && <span className="meta">{ev.calendar_name}</span>}
+        </span>
+      </div>
+      <span className="evt-prof">{ev.professor || '—'}</span>
+      <span className="evt-room">{roomDisplay(ev)}</span>
+      <span className="evt-group">{groupDisplay(ev, calendarsMap) || '—'}</span>
+      <span className={'evt-status status status-' + st.key}>{st.text}</span>
+    </div>
+  )
+})
+
+function Board({ evts, emptyMsg, now, calendarsMap }) {
+  return (
+    <div className="evt-table">
+      <div className="evt-head" aria-hidden="true">
+        <span>Time</span><span>Class</span><span>Professor</span>
+        <span>Room</span><span>Year / Group</span><span style={{ textAlign: 'right' }}>Status</span>
+      </div>
+      {evts.length === 0 ? (
+        <div className="state">
+          <span className="icon" aria-hidden="true">📭</span>
+          <p>{emptyMsg}</p>
+        </div>
+      ) : evts.map((ev, idx) => (
+        <BoardRow key={(ev.start || '') + (ev.room || '') + idx}
+          ev={ev} now={now} calendarsMap={calendarsMap} />
+      ))}
+    </div>
+  )
+}
+
 export default function Departures() {
   const [events, setEvents] = useState([])
   const [loading, setLoading] = useState(true)
@@ -117,48 +167,6 @@ export default function Departures() {
     ? currentSlide
     : slides.find(s => s.events.length > 0) || currentSlide
 
-  const Row = ({ ev }) => {
-    const st = eventStatus(ev, now)
-    const type = activityType(ev)
-    return (
-      <div
-        className={'evt-row' + (st.key === 'ongoing' ? ' is-ongoing' : '') + (st.key === 'finished' ? ' is-finished' : '')}
-        style={{ '--row-accent': ev.color || 'var(--utcn-blue)' }}
-      >
-        <div className="evt-time">
-          <span className="start">{formatHM(ev.start)}</span>
-          <span className="end">{ev.end ? formatHM(ev.end) : ''}</span>
-        </div>
-        <div className="evt-main">
-          <span className="evt-title">{ev.display_title || ev.title}</span>
-          <span className="evt-sub">
-            {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
-            {ev.calendar_name && <span className="meta">{ev.calendar_name}</span>}
-          </span>
-        </div>
-        <span className="evt-prof">{ev.professor || '—'}</span>
-        <span className="evt-room">{roomDisplay(ev)}</span>
-        <span className="evt-group">{groupDisplay(ev, calendarsMap) || '—'}</span>
-        <span className={'evt-status status status-' + st.key}>{st.text}</span>
-      </div>
-    )
-  }
-
-  const Board = ({ evts, emptyMsg }) => (
-    <div className="evt-table">
-      <div className="evt-head" aria-hidden="true">
-        <span>Time</span><span>Class</span><span>Professor</span>
-        <span>Room</span><span>Year / Group</span><span style={{ textAlign: 'right' }}>Status</span>
-      </div>
-      {evts.length === 0 ? (
-        <div className="state">
-          <span className="icon" aria-hidden="true">📭</span>
-          <p>{emptyMsg}</p>
-        </div>
-      ) : evts.map((ev, idx) => <Row key={(ev.start || '') + (ev.room || '') + idx} ev={ev} />)}
-    </div>
-  )
-
   return (
     <div>
       <div className="toolbar">
@@ -212,7 +220,8 @@ export default function Departures() {
               <span className="count">{todayEvents.length} total today</span>
             </div>
             <div style={{ opacity: slideVisible ? 1 : 0, transition: 'opacity .4s' }}>
-              <Board evts={displaySlide.events} emptyMsg="No classes in this slot." />
+              <Board evts={displaySlide.events} emptyMsg="No classes in this slot."
+                now={now} calendarsMap={calendarsMap} />
             </div>
           </section>
 
@@ -221,7 +230,8 @@ export default function Departures() {
               Tomorrow
               <span className="count">{tomorrowEvents.length} classes</span>
             </div>
-            <Board evts={tomorrowEvents.slice(0, 20)} emptyMsg="No classes scheduled for tomorrow." />
+            <Board evts={tomorrowEvents.slice(0, 20)} emptyMsg="No classes scheduled for tomorrow."
+              now={now} calendarsMap={calendarsMap} />
           </section>
         </>
       )}

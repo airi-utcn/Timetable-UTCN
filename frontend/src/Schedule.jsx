@@ -5,9 +5,40 @@ import {
 } from './lib'
 
 const CALENDAR_COLORS = [
-  '#1b4f9c', '#00b4d8', '#2dd36f', '#ff5c69',
-  '#ffb347', '#b388ff', '#2ec4b6', '#e83e8c',
+  '#5b8def', '#4cc3d9', '#56c596', '#e07a8b',
+  '#d9a05b', '#a78bdb', '#52b8a8', '#c77fb0',
 ]
+
+// Module-scope row component — defining it inside Schedule would remount
+// (and re-animate) every row on each state change, causing visible flicker.
+const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars }) {
+  const st = eventStatus(ev, now)
+  const type = activityType(ev)
+  return (
+    <div
+      className={'evt-row' + (st.key === 'ongoing' ? ' is-ongoing' : '') + (st.key === 'finished' ? ' is-finished' : '')}
+      style={{ '--row-accent': ev.color || 'var(--accent)' }}
+    >
+      <div className="evt-time">
+        <span className="start">{formatHM(ev.start)}</span>
+        <span className="end">{ev.end ? formatHM(ev.end) : ''}</span>
+      </div>
+      <div className="evt-main">
+        <span className="evt-title">{ev.display_title || ev.title}</span>
+        <span className="evt-sub">
+          {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
+          {ev.subject && ev.subject !== (ev.display_title || ev.title) && (
+            <span className="meta">{ev.subject}</span>
+          )}
+        </span>
+      </div>
+      <span className="evt-prof">{ev.professor || '—'}</span>
+      <span className="evt-room">{roomDisplay(ev)}</span>
+      <span className="evt-group">{groupDisplay(ev, calendars) || '—'}</span>
+      <span className={'evt-status status status-' + st.key}>{st.text}</span>
+    </div>
+  )
+})
 
 export default function Schedule() {
   const [events, setEvents] = useState([])
@@ -294,35 +325,6 @@ export default function Schedule() {
   const someCalendarsDisabled = Object.values(enabledCalendars).some(v => v === false)
   const hasActiveFilters = filters.subject || filters.professor || filters.room || filters.group || searchQuery || someCalendarsDisabled
 
-  const Row = ({ ev }) => {
-    const st = eventStatus(ev, now)
-    const type = activityType(ev)
-    return (
-      <div
-        className={'evt-row' + (st.key === 'ongoing' ? ' is-ongoing' : '') + (st.key === 'finished' ? ' is-finished' : '')}
-        style={{ '--row-accent': ev.color || 'var(--utcn-blue)' }}
-      >
-        <div className="evt-time">
-          <span className="start">{formatHM(ev.start)}</span>
-          <span className="end">{ev.end ? formatHM(ev.end) : ''}</span>
-        </div>
-        <div className="evt-main">
-          <span className="evt-title">{ev.display_title || ev.title}</span>
-          <span className="evt-sub">
-            {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
-            {ev.subject && ev.subject !== (ev.display_title || ev.title) && (
-              <span className="meta">{ev.subject}</span>
-            )}
-          </span>
-        </div>
-        <span className="evt-prof">{ev.professor || '—'}</span>
-        <span className="evt-room">{roomDisplay(ev)}</span>
-        <span className="evt-group">{groupDisplay(ev, calendars) || '—'}</span>
-        <span className={'evt-status status status-' + st.key}>{st.text}</span>
-      </div>
-    )
-  }
-
   return (
     <div>
       <div className="toolbar">
@@ -486,7 +488,8 @@ export default function Schedule() {
               <span>Room</span><span>Year / Group</span><span style={{ textAlign: 'right' }}>Status</span>
             </div>
             {groupedByDate[date].map((ev, idx) => (
-              <Row key={(ev.start || '') + (ev.room || '') + idx} ev={ev} />
+              <ScheduleRow key={(ev.start || '') + (ev.room || '') + idx}
+                ev={ev} now={now} calendars={calendars} />
             ))}
           </div>
         </section>

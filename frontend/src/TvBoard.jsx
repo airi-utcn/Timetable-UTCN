@@ -15,6 +15,48 @@ function readBuildingParam() {
   } catch (e) { return '' }
 }
 
+// Module-scope components: defining these inside TvBoard would create a new
+// component type on every render (the clock re-renders each second), forcing
+// React to unmount/remount every card — which made the whole board flicker.
+const TvCard = React.memo(function TvCard({ ev, now, calendars }) {
+  const st = eventStatus(ev, now)
+  const type = activityType(ev)
+  const grp = groupDisplay(ev, calendars)
+  return (
+    <div
+      className={'tv-card' + (st.key === 'ongoing' ? ' is-ongoing' : '')}
+      style={{ '--row-accent': ev.color || 'var(--accent)' }}
+    >
+      <div className="tv-card-time">
+        <div className="start">{formatHM(ev.start)}</div>
+        <div className="end">{ev.end ? formatHM(ev.end) : ''}</div>
+      </div>
+      <div className="tv-card-main">
+        <div className="tv-card-title">{ev.display_title || ev.title}</div>
+        <div className="tv-card-meta">
+          {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
+          {grp && <span>{grp}</span>}
+          {ev.professor && <span>{ev.professor}</span>}
+          <span className={'status status-' + st.key}>{st.text}</span>
+        </div>
+      </div>
+      <div className="tv-card-room">
+        <div className="label">Room</div>
+        <div className="room">{roomDisplay(ev)}</div>
+      </div>
+    </div>
+  )
+})
+
+function TvEmptyCol({ msg }) {
+  return (
+    <div className="tv-empty">
+      <span className="icon" aria-hidden="true">✓</span>
+      <span>{msg}</span>
+    </div>
+  )
+}
+
 export default function TvBoard({ onExit }) {
   const [events, setEvents] = useState([])
   const [calendars, setCalendars] = useState({})
@@ -84,6 +126,11 @@ export default function TvBoard({ onExit }) {
 
   const todayStr = localDateStr(now)
 
+  // Minute-resolution timestamp for status computations: keeps the per-second
+  // clock from re-rendering (and re-animating) every card in the lists.
+  const minuteKey = Math.floor(now.getTime() / 60000)
+  const statusNow = useMemo(() => new Date(minuteKey * 60000), [minuteKey])
+
   const filtered = useMemo(() => {
     let evs = events.filter(ev => ev.start && ev.start.startsWith(todayStr))
     if (building) {
@@ -96,15 +143,15 @@ export default function TvBoard({ onExit }) {
   }, [events, building, todayStr])
 
   const nowEvents = useMemo(
-    () => filtered.filter(ev => eventStatus(ev, now).key === 'ongoing'),
-    [filtered, now]
+    () => filtered.filter(ev => eventStatus(ev, statusNow).key === 'ongoing'),
+    [filtered, statusNow]
   )
   const nextEvents = useMemo(
     () => filtered.filter(ev => {
-      const k = eventStatus(ev, now).key
+      const k = eventStatus(ev, statusNow).key
       return k === 'next' || k === 'upcoming'
     }),
-    [filtered, now]
+    [filtered, statusNow]
   )
 
   // room availability: rooms known from calendars (in selected building)
@@ -140,43 +187,6 @@ export default function TvBoard({ onExit }) {
   const dateStr = now.toLocaleDateString('en-GB', {
     weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
   })
-
-  const Card = ({ ev }) => {
-    const st = eventStatus(ev, now)
-    const type = activityType(ev)
-    const grp = groupDisplay(ev, calendars)
-    return (
-      <div
-        className={'tv-card' + (st.key === 'ongoing' ? ' is-ongoing' : '')}
-        style={{ '--row-accent': ev.color || 'var(--utcn-blue)' }}
-      >
-        <div className="tv-card-time">
-          <div className="start">{formatHM(ev.start)}</div>
-          <div className="end">{ev.end ? formatHM(ev.end) : ''}</div>
-        </div>
-        <div className="tv-card-main">
-          <div className="tv-card-title">{ev.display_title || ev.title}</div>
-          <div className="tv-card-meta">
-            {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
-            {grp && <span>{grp}</span>}
-            {ev.professor && <span>{ev.professor}</span>}
-            <span className={'status status-' + st.key}>{st.text}</span>
-          </div>
-        </div>
-        <div className="tv-card-room">
-          <div className="label">Room</div>
-          <div className="room">{roomDisplay(ev)}</div>
-        </div>
-      </div>
-    )
-  }
-
-  const EmptyCol = ({ msg }) => (
-    <div className="tv-empty">
-      <span className="icon" aria-hidden="true">✓</span>
-      <span>{msg}</span>
-    </div>
-  )
 
   return (
     <div className="tv">
@@ -230,8 +240,11 @@ export default function TvBoard({ onExit }) {
             </div>
             <div className="tv-list">
               {nowEvents.length === 0
-                ? <EmptyCol msg="No classes in progress" />
-                : nowPage.items.map((ev, i) => <Card key={(ev.start || '') + (ev.room || '') + i} ev={ev} />)}
+                ? <TvEmptyCol msg="No classes in progress" />
+                : nowPage.items.map((ev, i) => (
+                    <TvCard key={(ev.start || '') + (ev.room || '') + i}
+                      ev={ev} now={statusNow} calendars={calendars} />
+                  ))}
             </div>
           </section>
 
@@ -244,8 +257,11 @@ export default function TvBoard({ onExit }) {
             </div>
             <div className="tv-list">
               {nextEvents.length === 0
-                ? <EmptyCol msg="No more classes today" />
-                : nextPage.items.map((ev, i) => <Card key={(ev.start || '') + (ev.room || '') + i} ev={ev} />)}
+                ? <TvEmptyCol msg="No more classes today" />
+                : nextPage.items.map((ev, i) => (
+                    <TvCard key={(ev.start || '') + (ev.room || '') + i}
+                      ev={ev} now={statusNow} calendars={calendars} />
+                  ))}
             </div>
           </section>
         </div>
