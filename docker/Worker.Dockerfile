@@ -30,15 +30,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy only requirements first for caching
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-RUN pip install --no-cache-dir playwright
+COPY requirements.txt requirements.lock /app/
+RUN pip install --no-cache-dir -r requirements.lock
 
-# Install browsers
-RUN python -m playwright install chromium
+# Install browsers where the runtime user can read them.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers
+RUN python -m playwright install chromium \
+    && chmod -R a+rX /opt/playwright-browsers
+RUN useradd --create-home --uid 1000 appuser
 
 # Copy project
 COPY . /app
+RUN chmod -R a+rX /app
+
+USER appuser
 
 # Use dumb-init for proper signal handling
 ENTRYPOINT ["dumb-init", "--"]

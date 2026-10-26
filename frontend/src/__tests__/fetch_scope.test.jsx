@@ -32,24 +32,12 @@ describe('Scoped fetch behavior', () => {
     render(<Schedule />)
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalled()
+      expect(findEventsCall(global.fetch.mock.calls)).toBeTruthy()
     })
 
-    // Compute expected week start/end using the same logic as the app (Monday start)
-    const computeWeekStart = (date, offset = 0) => {
-      const d = new Date(date)
-      const day = d.getDay()
-      const diff = d.getDate() - day + (day === 0 ? -6 : 1)
-      d.setDate(diff + (offset * 7))
-      d.setHours(0, 0, 0, 0)
-      return d.toISOString().split('T')[0]
-    }
-    const expectedFrom = computeWeekStart(new Date(2026, 0, 15), 0)
-    const expectedTo = (function(fromStr) {
-      const d = new Date(fromStr)
-      d.setDate(d.getDate() + 6)
-      return d.toISOString().split('T')[0]
-    })(expectedFrom)
+    // Calendar dates must remain Monday through Sunday in the local timezone.
+    const expectedFrom = '2026-01-12'
+    const expectedTo = '2026-01-18'
     let matched = false
     for (const call of global.fetch.mock.calls) {
       const url = call[0]
@@ -70,7 +58,7 @@ describe('Scoped fetch behavior', () => {
     render(<Schedule />)
 
     await waitFor(() => {
-      expect(global.fetch).toHaveBeenCalled()
+      expect(findEventsCall(global.fetch.mock.calls)).toBeTruthy()
     })
 
     const initialCount = global.fetch.mock.calls.length

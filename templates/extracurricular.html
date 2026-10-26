@@ -227,6 +227,8 @@
         .category-social { background: #d97706; }
         .category-other { background: var(--gray-600); }
     </style>
+<meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='js/csrf.js') }}"></script>
 </head>
 <body>
     <div class="header">
@@ -241,7 +243,7 @@
             </div>
             <nav class="nav">
                 <a href="/departures">Departure Board</a>
-                <a href="/schedule">Calendar View</a>
+                <a href="/">Calendar View</a>
                 <a href="/events" class="active">Events</a>
                 <a href="/admin">Admin</a>
             </nav>
@@ -251,7 +253,7 @@
     <div class="container">
         <div class="page-header">
             <h2 class="page-title">Upcoming Events</h2>
-            <button class="btn btn-primary" onclick="openModal()">Add New Event</button>
+            {% if is_admin %}<button class="btn btn-primary" onclick="openModal()">Add New Event</button>{% endif %}
         </div>
         
         {% if events %}
@@ -288,16 +290,16 @@
                     <div class="event-description">{{ event.description }}</div>
                     {% endif %}
                 </div>
-                <div class="event-card-footer">
+                {% if is_admin %}<div class="event-card-footer">
                     <button class="btn btn-danger btn-sm btn-delete-event" type="button" data-id="{{ event.id }}">Delete</button>
-                </div>
+                </div>{% endif %}
             </div>
             {% endfor %}
         </div>
         {% else %}
         <div class="empty-state">
             <h3>No Events Scheduled</h3>
-            <p>There are no extracurricular events at the moment. Click "Add New Event" to create one.</p>
+            <p>There are no extracurricular events at the moment.{% if is_admin %} Click "Add New Event" to create one.{% endif %}</p>
         </div>
         {% endif %}
     </div>

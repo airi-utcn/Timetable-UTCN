@@ -4,7 +4,7 @@ import App from './App'
 import './styles.css'
 
 // Development-only client-side error reporter: sends JS errors to the server
-try {
+if (import.meta.env.DEV) try {
   window.addEventListener('error', function (evt) {
     try {
       const payload = {

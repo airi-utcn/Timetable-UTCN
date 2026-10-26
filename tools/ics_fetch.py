@@ -21,6 +21,12 @@ from __future__ import annotations
 
 import logging
 import time
+from urllib.parse import urljoin
+
+try:
+    from .calendar_security import validate_calendar_url, UnsafeCalendarURL
+except ImportError:
+    from calendar_security import validate_calendar_url, UnsafeCalendarURL
 from datetime import date, datetime, timedelta
 from typing import List, Optional
 
@@ -52,33 +58,70 @@ class FetchError(RuntimeError):
     """Raised when an ICS URL cannot be fetched or parsed after retries."""
 
 
-def fetch_text(url: str, session: Optional[requests.Session] = None) -> str:
-    """GET a URL with timeout and exponential-backoff retries.
+MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+MAX_FETCH_SECONDS = 60
 
-    Retries on connection errors, timeouts and 5xx/429 responses.
-    Raises FetchError when all attempts fail.
+
+def fetch_text(url: str, session: Optional[requests.Session] = None) -> str:
+    """Bounded HTTPS fetch; validate every redirect and close every response.
+
+    Only retry transient HTTP/network failures. A successful empty calendar is
+    distinct from a failed fetch, so callers can safely retain previous data.
     """
-    sess = session or requests
-    last_err: Optional[Exception] = None
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = sess.get(url, headers=_HEADERS,
-                            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT))
-            if resp.status_code in (429, 500, 502, 503, 504):
-                last_err = FetchError(f"HTTP {resp.status_code}")
-                raise last_err
-            resp.raise_for_status()
-            # Outlook serves ICS as text; ensure correct decoding
-            resp.encoding = resp.encoding or "utf-8"
-            return resp.text
-        except (requests.exceptions.RequestException, FetchError) as e:
-            last_err = e
-            if attempt < MAX_RETRIES - 1:
-                delay = BACKOFF_BASE * (2 ** attempt)
-                log.warning("fetch attempt %d/%d failed for %s: %s — retrying in %.1fs",
-                            attempt + 1, MAX_RETRIES, url, e, delay)
-                time.sleep(delay)
-    raise FetchError(f"failed to fetch {url} after {MAX_RETRIES} attempts: {last_err}")
+    try:
+        url = validate_calendar_url(url)
+    except UnsafeCalendarURL as exc:
+        raise FetchError(str(exc)) from exc
+    owned_session = session is None
+    sess = session or requests.Session()
+    if owned_session:
+        # Do not allow ambient proxy/.netrc credentials to bypass the URL policy.
+        sess.trust_env = False
+    try:
+        for attempt in range(MAX_RETRIES):
+            started = time.monotonic()
+            current_url = url
+            try:
+                for redirect_count in range(6):
+                    remaining = MAX_FETCH_SECONDS - (time.monotonic() - started)
+                    if remaining <= 0:
+                        raise FetchError('Calendar request exceeded its time limit.')
+                    validate_calendar_url(current_url, resolve=True)
+                    resp = sess.get(current_url, headers=_HEADERS,
+                                    timeout=(min(CONNECT_TIMEOUT, remaining), min(READ_TIMEOUT, remaining)),
+                                    allow_redirects=False, stream=True)
+                    try:
+                        if resp.status_code in (301, 302, 303, 307, 308):
+                            if redirect_count == 5 or not resp.headers.get('Location'):
+                                raise FetchError('Invalid or excessive calendar redirects.')
+                            current_url = urljoin(current_url, resp.headers['Location'])
+                            continue
+                        if resp.status_code in (429, 500, 502, 503, 504):
+                            raise requests.exceptions.ConnectionError(f'HTTP {resp.status_code}')
+                        if resp.status_code >= 400:
+                            raise FetchError(f'Calendar server returned HTTP {resp.status_code}.')
+                        length = resp.headers.get('Content-Length')
+                        if length and int(length) > MAX_RESPONSE_BYTES:
+                            raise FetchError('Calendar response exceeds the size limit.')
+                        chunks = []
+                        size = 0
+                        for chunk in resp.iter_content(chunk_size=65536):
+                            size += len(chunk)
+                            if size > MAX_RESPONSE_BYTES or time.monotonic() - started > MAX_FETCH_SECONDS:
+                                raise FetchError('Calendar response exceeds the size or time limit.')
+                            chunks.append(chunk)
+                        return b''.join(chunks).decode(resp.encoding or 'utf-8', errors='replace')
+                    finally:
+                        resp.close()
+            except UnsafeCalendarURL as exc:
+                raise FetchError(str(exc)) from exc
+            except requests.exceptions.RequestException as exc:
+                if attempt == MAX_RETRIES - 1:
+                    raise FetchError(f'Calendar fetch failed after {MAX_RETRIES} attempts.') from exc
+                time.sleep(BACKOFF_BASE * (2 ** attempt))
+    finally:
+        if owned_session:
+            sess.close()
 
 
 def _to_local_naive(value) -> Optional[datetime]:
@@ -107,6 +150,25 @@ def _parse_with_icalendar(text: str, window_start: datetime,
     import recurring_ical_events
 
     cal = icalendar.Calendar.from_ical(text)
+
+    # Bound expansion before the recurrence library materializes its result list.
+    estimate = 0
+    for event in cal.walk('VEVENT'):
+        rules = event.get('RRULE') or []
+        if rules and not isinstance(rules, list):
+            rules = [rules]
+        if not rules:
+            estimate += 1
+        for rule in rules:
+            frequency = str(rule.get('FREQ', [''])[0]).upper()
+            if frequency not in {'DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY'}:
+                raise FetchError('Subdaily recurrence rules are not supported for timetable feeds.')
+            multiplier = 1
+            for key in ('BYHOUR', 'BYMINUTE', 'BYSECOND'):
+                multiplier *= max(1, len(rule.get(key, [])))
+            estimate += ((window_end - window_start).days + 1) * multiplier
+        if estimate > 100000:
+            raise FetchError('Calendar recurrence expansion exceeds the event limit.')
 
     # recurring_ical_events expects tz-aware bounds when events are tz-aware;
     # using local tz keeps the window aligned with Romanian wall-clock days.
@@ -149,7 +211,7 @@ def _parse_with_ics_lib(text: str, window_start: datetime,
             end = getattr(e, "end", None)
             start_dt = _to_local_naive(begin.datetime) if begin else None
             end_dt = _to_local_naive(end.datetime) if end else None
-            if start_dt is None or not (window_start <= start_dt <= window_end):
+            if start_dt is None or not (window_start <= start_dt < window_end):
                 continue
             out.append({
                 "start": start_dt.isoformat(),
@@ -165,6 +227,10 @@ def _parse_with_ics_lib(text: str, window_start: datetime,
 
 def parse_ics_text(text: str, from_date: date, to_date: date) -> List[dict]:
     """Parse ICS text into event dicts within [from_date, to_date]."""
+    if to_date < from_date or (to_date - from_date).days > 366:
+        raise FetchError('Calendar date window must be ordered and at most 366 days.')
+    if len((text or '').encode('utf-8')) > MAX_RESPONSE_BYTES:
+        raise FetchError('Calendar exceeds the size limit.')
     body = (text or "").lstrip()
     if not body.upper().startswith("BEGIN:VCALENDAR"):
         raise FetchError("response is not an iCalendar (missing BEGIN:VCALENDAR)")
@@ -174,6 +240,8 @@ def parse_ics_text(text: str, from_date: date, to_date: date) -> List[dict]:
 
     try:
         return _parse_with_icalendar(text, window_start, window_end)
+    except FetchError:
+        raise
     except ImportError:
         log.warning("icalendar/recurring_ical_events not installed — "
                     "falling back to legacy parser (NO recurrence expansion)")

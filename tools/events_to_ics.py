@@ -100,57 +100,42 @@ def load_events(path: str):
 
 
 def build_ics(events, out_file: pathlib.Path):
-    lines = []
-    lines.append('BEGIN:VCALENDAR')
-    lines.append('VERSION:2.0')
-    lines.append('PRODID:-//outlook-calendar-extractor//EN')
-
+    """Serialize with RFC 5545 escaping/folding; never interpolate feed text as lines."""
+    from datetime import timezone
+    from zoneinfo import ZoneInfo
+    from icalendar import Calendar, Event
+    try:
+        from tools.storage import atomic_write_bytes
+    except ImportError:
+        from storage import atomic_write_bytes
+    calendar = Calendar()
+    calendar.add('version', '2.0')
+    calendar.add('prodid', '-//outlook-calendar-extractor//EN')
+    local_tz = ZoneInfo('Europe/Bucharest')
     for ev in events:
-        st = ev['start']
-        end = ev['end']
-        if not st or not end:
+        start, end = ev.get('start'), ev.get('end')
+        if not start or not end:
             continue
-        title = ev['title'] or ''
-        location = ev['location'] or ''
-        subj, prof = parse_professor_and_subject(title)
-        summary = title
-        uid_src = (title or '') + (location or '') + (st.isoformat() if st else '')
-        uid = hashlib.sha1(uid_src.encode('utf-8')).hexdigest() + '@extracted'
-
-        lines.append('BEGIN:VEVENT')
-        lines.append('UID:' + uid)
-        lines.append('DTSTAMP:' + datetime.utcnow().strftime('%Y%m%dT%H%M%SZ'))
-        lines.append('DTSTART:' + format_dt_for_ics(st))
-        lines.append('DTEND:' + format_dt_for_ics(end))
-        lines.append('SUMMARY:' + summary.replace('\n', ' '))
-        if location:
-            # try to make a friendly room representation from location
-            room = location.split('@', 1)[0]
-            lines.append('LOCATION:' + room)
-        # build description including professor and raw details
-        desc_lines = []
-        if prof:
-            desc_lines.append('Professor: ' + prof)
-        if subj:
-            desc_lines.append('Subject code: ' + subj)
-        # include raw JSON snippet
-        try:
-            raw_text = json.dumps(ev.get('raw', {}), ensure_ascii=False)
-            desc_lines.append('Raw: ' + raw_text)
-        except Exception:
-            pass
-        # join and escape
-        if desc_lines:
-            desc = '\n'.join(desc_lines)
-            # iCalendar line folding: naive approach, escape newlines
-            desc = desc.replace('\n', '\n')
-            lines.append('DESCRIPTION:' + desc.replace('\r', ''))
-
-        lines.append('END:VEVENT')
-
-    lines.append('END:VCALENDAR')
-
-    out_file.write_text('\r\n'.join(lines), encoding='utf-8')
+        title = ev.get('title') or ''
+        location = ev.get('location') or ''
+        event = Event()
+        uid_source = f'{title}|{location}|{start.isoformat()}'
+        event.add('uid', hashlib.sha256(uid_source.encode()).hexdigest() + '@extracted')
+        event.add('dtstamp', datetime.now(timezone.utc))
+        event.add('dtstart', (start if start.tzinfo else start.replace(tzinfo=local_tz)).astimezone(timezone.utc))
+        event.add('dtend', (end if end.tzinfo else end.replace(tzinfo=local_tz)).astimezone(timezone.utc))
+        event.add('summary', title)
+        event.add('location', location.split('@', 1)[0])
+        subject, professor = parse_professor_and_subject(title)
+        description = []
+        if professor:
+            description.append('Professor: ' + professor)
+        if subject:
+            description.append('Subject code: ' + subject)
+        if description:
+            event.add('description', '\n'.join(description))
+        calendar.add_component(event)
+    atomic_write_bytes(out_file, calendar.to_ical())
     return out_file
 
 

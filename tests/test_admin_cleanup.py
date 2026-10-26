@@ -39,9 +39,10 @@ class AdminCleanupTests(unittest.TestCase):
             json.dump(events, f)
 
         client = self.app.app.test_client()
-        # use default password ADMIN_PASSWORD ('admin123') -> Basic auth header
+        # Use explicit test credentials through a Basic auth header
         import base64
-        token = base64.b64encode(b'admin:admin123').decode('ascii')
+        credentials = f'{self.app.ADMIN_USERNAME}:{self.app.ADMIN_PASSWORD}'
+        token = base64.b64encode(credentials.encode()).decode('ascii')
         headers = {'Authorization': f'Basic {token}'}
 
         resp = client.post('/admin/cleanup_old_events', headers=headers)

@@ -180,7 +180,7 @@
         <div class="error">{{ message }}</div>
       {% endif %}
       <form method="post" action="/admin/login">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="csrf_token" value="{{ login_csrf_token }}" />
         <label>Username <input name="username" autocomplete="username" required /></label>
         <label>Password <input name="password" type="password" autocomplete="current-password" required/></label>
         <button type="submit">Login</button>

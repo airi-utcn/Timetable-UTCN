@@ -33,6 +33,7 @@ require_cmd git
 require_cmd docker
 require_cmd curl
 require_cmd sed
+require_cmd openssl
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
@@ -78,42 +79,27 @@ set -a
 . ./.env || true
 set +a
 
-# Clean invalid values (like the default 'your-secure-password-here' from .env.example)
-if grep -q "your-secure-password-here" .env; then
-    warn "Found dummy password 'your-secure-password-here' in .env. Replacing with 'admin123'."
-    sed -i.bak 's/your-secure-password-here/admin123/' .env
-    export ADMIN_PASSWORD=admin123
+# Generate strong credentials instead of silently deploying known passwords.
+chmod 600 .env
+if [ -z "${FLASK_SECRET:-}" ] || [ "${FLASK_SECRET:-}" = "change-this-to-a-random-string" ] || [ "${FLASK_SECRET:-}" = "change-me-in-production" ] || [ "${#FLASK_SECRET}" -lt 32 ]; then
+    FLASK_SECRET=$(openssl rand -hex 32)
+    export FLASK_SECRET
+    sed -i.bak '/^FLASK_SECRET=/d' .env
+    printf '\nFLASK_SECRET=%s\n' "$FLASK_SECRET" >> .env
+    info "Generated a new session secret in .env"
 fi
-
-# Generate a FLASK_SECRET if not set
-if [ -z "${FLASK_SECRET:-}" ]; then
-    info "Generating a random FLASK_SECRET and appending to .env"
-    # 32 bytes hex = 64 chars
-    FLASK_SECRET_VAL=$(openssl rand -hex 32 2>/dev/null || python3 - <<'PY'
-import secrets
-print(secrets.token_hex(32))
-PY
-)
-    printf "\nFLASK_SECRET=%s\n" "$FLASK_SECRET_VAL" >> .env
-    export FLASK_SECRET="$FLASK_SECRET_VAL"
-fi
-
-# Ensure ADMIN_USERNAME/ADMIN_PASSWORD exist in .env; if not, append defaults from example
 if [ -z "${ADMIN_USERNAME:-}" ]; then
-    info "ADMIN_USERNAME missing in .env; defaulting to 'admin' (edit .env to change)"
-    printf "\nADMIN_USERNAME=admin\n" >> .env
     export ADMIN_USERNAME=admin
+    printf '\nADMIN_USERNAME=admin\n' >> .env
 fi
-if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    warn "ADMIN_PASSWORD missing in .env; defaulting to 'admin123' (edit .env to change)"
-    printf "\nADMIN_PASSWORD=admin123\n" >> .env
-    export ADMIN_PASSWORD=admin123
+if [ -z "${ADMIN_PASSWORD:-}" ] || [ "${ADMIN_PASSWORD:-}" = "admin123" ] || [ "${ADMIN_PASSWORD:-}" = "your-secure-password-here" ] || [ "${ADMIN_PASSWORD:-}" = "change-this-password" ] || [ "${#ADMIN_PASSWORD}" -lt 12 ]; then
+    ADMIN_PASSWORD=$(openssl rand -hex 24)
+    export ADMIN_PASSWORD
+    sed -i.bak '/^ADMIN_PASSWORD=/d' .env
+    printf '\nADMIN_PASSWORD=%s\n' "$ADMIN_PASSWORD" >> .env
+    info "Generated a strong admin password in .env; read it locally to sign in."
 fi
-
-# Warn if using weak default password
-if [ "${ADMIN_PASSWORD}" = "admin123" ]; then
-	warn "Using default ADMIN_PASSWORD 'admin123' — consider setting a stronger password in .env"
-fi
+rm -f .env.bak
 
 echo "🔧 Stopping existing containers (preserve volumes)..."
 "${DC[@]}" down --remove-orphans || true
@@ -157,7 +143,7 @@ if [ "${RUN_LOCAL_ADMIN_TEST}" = "true" ]; then
 	fi
 
 	# Prepare temp files
-	ADMIN_TEST_DIR=$(mktemp -d 2>/dev/null || echo /tmp)
+	ADMIN_TEST_DIR=$(mktemp -d)
 	ADMIN_GET_HTML="$ADMIN_TEST_DIR/admin_get.html"
 	ADMIN_LOGIN_HTML="$ADMIN_TEST_DIR/admin_login.html"
 	COOKIES_FILE="$ADMIN_TEST_DIR/admin_cookies.txt"
@@ -170,7 +156,7 @@ if [ "${RUN_LOCAL_ADMIN_TEST}" = "true" ]; then
 	else
 		# Perform POST with credentials
 		USERNAME_VAL="${ADMIN_USERNAME:-admin}"
-		PASSWORD_VAL="${ADMIN_PASSWORD:-admin123}"
+		PASSWORD_VAL="${ADMIN_PASSWORD}"
 		curl -s -b "$COOKIES_FILE" -c "$COOKIES_FILE" -i -L -X POST 'http://localhost:5000/admin/login' \
 			--data-urlencode "username=${USERNAME_VAL}" \
 			--data-urlencode "password=${PASSWORD_VAL}" \

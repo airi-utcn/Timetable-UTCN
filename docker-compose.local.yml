@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   timetable:
     build:
@@ -17,20 +15,22 @@ services:
       - playwright_user_data:/app/playwright_data
     environment:
       FLASK_ENV: production
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-0}
+      CALENDAR_ALLOWED_HOSTS: ${CALENDAR_ALLOWED_HOSTS:-}
       TZ: ${TZ:-Europe/Bucharest}
-      FLASK_SECRET: ${FLASK_SECRET:-change-me-in-production}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin123}
+      FLASK_SECRET: ${FLASK_SECRET:?Set FLASK_SECRET in .env}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       PLAYWRIGHT_USER_DATA_DIR: /app/playwright_data
       # ── Performance tuning for 32 GB / 16 vCPU ──
-      GUNICORN_WORKERS: "8"
-      GUNICORN_THREADS: "4"
-      GUNICORN_WORKER_CLASS: "gthread"
-      GUNICORN_TIMEOUT: "180"
-      GUNICORN_KEEPALIVE: "5"
-      GUNICORN_MAX_REQUESTS: "2000"
-      GUNICORN_MAX_REQUESTS_JITTER: "200"
+      GUNICORN_WORKERS: "${GUNICORN_WORKERS:-8}"
+      GUNICORN_THREADS: "${GUNICORN_THREADS:-4}"
+      GUNICORN_WORKER_CLASS: "${GUNICORN_WORKER_CLASS:-gthread}"
+      GUNICORN_TIMEOUT: "${GUNICORN_TIMEOUT:-180}"
+      GUNICORN_KEEPALIVE: "${GUNICORN_KEEPALIVE:-5}"
+      GUNICORN_MAX_REQUESTS: "${GUNICORN_MAX_REQUESTS:-2000}"
+      GUNICORN_MAX_REQUESTS_JITTER: "${GUNICORN_MAX_REQUESTS_JITTER:-200}"
       SQLITE_WAL_MODE: "1"
-      PLAYWRIGHT_CONCURRENCY: "6"
+      PLAYWRIGHT_CONCURRENCY: "${PLAYWRIGHT_CONCURRENCY:-6}"
       PYTHONMALLOC: "pymalloc"
       MALLOC_ARENA_MAX: "4"
     ulimits:

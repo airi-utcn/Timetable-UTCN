@@ -241,10 +241,14 @@ The Vite dev server proxies these endpoints to Flask during frontend development
 ### For Local Development
 
 - Python 3.11 or newer
-- Node.js 20 or newer
+- Node.js 22.12 or newer (or Node.js 20.19+)
 - npm
 - Playwright browser dependencies, if running HTML calendar extraction locally
 - Git
+
+## Security and scalability review
+
+See [REVIEW.md](REVIEW.md) for the implemented security/performance fixes, verification results, deployment changes, and prioritized scaling work. Production startup requires an explicit strong `ADMIN_PASSWORD` and `FLASK_SECRET`. Build the frontend before using the admin panel; its JavaScript is now served locally. For HTTPS deployments, set `SESSION_COOKIE_SECURE=1`.
 
 ## Configuration
 
@@ -258,8 +262,8 @@ Common environment variables:
 
 ```text
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=change-this-password
-FLASK_SECRET=replace-with-a-long-random-secret
+ADMIN_PASSWORD=
+FLASK_SECRET=
 PORT=5000
 PLAYWRIGHT_USERNAME=
 PLAYWRIGHT_PASSWORD=
@@ -267,6 +271,7 @@ PLAYWRIGHT_PASSWORD=
 
 Important notes:
 
+- Fill in both blank security values before starting production; `./deploy.sh` can generate them.
 - Change `ADMIN_PASSWORD` before any shared or production deployment.
 - Set `FLASK_SECRET` to a long random string for persistent, secure sessions.
 - `PORT` defaults to `5000`.
@@ -281,7 +286,7 @@ Install Python dependencies:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.lock
 ```
 
 Start Flask:
@@ -302,7 +307,7 @@ In a second terminal:
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run dev -- --host 127.0.0.1
 ```
 
@@ -432,7 +437,7 @@ Use strong credentials in `.env` for any non-local deployment.
 Run from the repository root:
 
 ```bash
-pytest
+python -m pytest
 ```
 
 Important test areas:

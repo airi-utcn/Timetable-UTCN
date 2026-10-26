@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   eventStatus, activityType, groupDisplay, roomDisplay,
-  normalizeBuilding, formatHM, localDateStr, progressPct, displayCalendarName,
+  normalizeBuilding, formatHM, localDateStr, addLocalDays, progressPct, displayCalendarName,
 } from '../lib'
 
 describe('eventStatus', () => {
@@ -104,5 +104,23 @@ describe('time formatting', () => {
   })
   it('localDateStr uses local calendar date', () => {
     expect(localDateStr(new Date(2026, 5, 11, 0, 30))).toBe('2026-06-11')
+  })
+})
+
+
+describe('calendar day arithmetic', () => {
+  it('keeps the next day when daylight saving ends', () => {
+    const next = addLocalDays(new Date(2026, 9, 25, 0, 30), 1)
+    expect(localDateStr(next)).toBe('2026-10-26')
+    expect(next.getHours()).toBe(0)
+  })
+  it('keeps the hour when daylight saving starts', () => {
+    const next = addLocalDays(new Date(2026, 2, 28, 12), 1)
+    expect(localDateStr(next)).toBe('2026-03-29')
+    expect(next.getHours()).toBe(12)
+  })
+  it('marks an event finished exactly at its end', () => {
+    expect(eventStatus({start: '2026-10-26T09:00:00', end: '2026-10-26T10:00:00'},
+      new Date('2026-10-26T10:00:00')).key).toBe('finished')
   })
 })

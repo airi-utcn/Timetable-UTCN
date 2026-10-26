@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   CANONICAL_BUILDINGS, buildingLabel, normalizeBuilding,
-  formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
+  formatHM, localDateStr, addLocalDays, eventStatus, activityType, TYPE_LABELS,
   typeChipClass, groupDisplay, roomDisplay, progressPct,
 } from './lib'
 
@@ -98,7 +98,7 @@ export default function TvBoard({ onExit }) {
     abortRef.current = ctrl
     try {
       const today = localDateStr(new Date())
-      const tomorrow = localDateStr(new Date(Date.now() + 86400000))
+      const tomorrow = localDateStr(addLocalDays(new Date(), 1))
       const [evRes, calRes] = await Promise.allSettled([
         fetch(`/events.json?from=${today}&to=${tomorrow}`, { signal: ctrl.signal }),
         fetch('/calendars.json', { signal: ctrl.signal }),
@@ -177,7 +177,7 @@ export default function TvBoard({ onExit }) {
   const freeRooms = useMemo(() => {
     const allRooms = new Set()
     Object.values(calendars).forEach(c => {
-      if (!c || !c.room) return
+      if (!c || !c.room || c.enabled === 0) return
       if (building) {
         const b = normalizeBuilding(c.building, c.name || '')
         if (b !== building) return

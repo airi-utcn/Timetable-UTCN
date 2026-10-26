@@ -252,6 +252,8 @@
         
         ol, ul { margin-left: 20px; line-height: 1.8; margin-top: 10px; }
     </style>
+<meta name="csrf-token" content="{{ csrf_token() }}">
+    <script src="{{ url_for('static', filename='js/csrf.js') }}"></script>
 </head>
 <body>
     <div class="header">
@@ -301,6 +303,7 @@
                 </div>
                 
                 <form action="/admin/set_calendar_url" method="post" id="saveCalendarForm">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                     <div class="form-group">
                         <label for="calendar_url">Published Calendar URL</label>
                         <input type="url" id="calendar_url" name="calendar_url" 
@@ -369,6 +372,7 @@
                             <td>{{ ev.category or 'Other' }}</td>
                             <td>
                                 <form method="post" action="/events/delete" style="display:inline">
+<input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                                     <input type="hidden" name="id" value="{{ ev.id }}">
                                     <button class="btn btn-secondary btn-delete-extracurricular" type="button" data-id="{{ ev.id }}">Delete</button>
                                 </form>

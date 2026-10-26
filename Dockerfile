@@ -5,7 +5,7 @@
 # ============================================
 # Stage 1: Build React Frontend
 # ============================================
-FROM node:20-alpine AS frontend-builder
+FROM node:22-alpine AS frontend-builder
 
 WORKDIR /app/frontend
 
@@ -13,7 +13,7 @@ WORKDIR /app/frontend
 COPY frontend/package*.json ./
 
 # Install dependencies with npm ci for reproducibility
-RUN npm ci --only=production=false
+RUN npm ci --include=dev
 
 # Copy frontend source
 COPY frontend/ ./
@@ -67,15 +67,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libcairo2 \
     # Performance: dumb-init for proper signal handling with gunicorn
     dumb-init \
+    util-linux \
     # Timezone database for TZ=Europe/Bucharest
     tzdata \
     # Cleanup
     && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt \
-    && pip install --no-cache-dir gunicorn
+COPY requirements.txt requirements.lock .
+RUN pip install --no-cache-dir -r requirements.lock
 
 # Install Playwright browsers to a shared path accessible by both root and appuser.
 # We set PLAYWRIGHT_BROWSERS_PATH so that any user (root during entrypoint setup,
@@ -105,11 +105,12 @@ COPY entrypoint.sh ./
 COPY --from=frontend-builder /app/frontend/dist/ frontend/dist/
 
 # Create data directories and set ownership
-RUN mkdir -p data playwright_captures \
-    && chown -R appuser:appuser /app \
+RUN chmod -R a+rX /app \
+    && mkdir -p data playwright_captures \
+    && chown -R appuser:appuser /app/data /app/playwright_captures /app/config \
     && chmod +x entrypoint.sh
 
-USER appuser
+USER root
 
 # Expose port
 EXPOSE 5000

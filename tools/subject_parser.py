@@ -184,7 +184,11 @@ class SubjectParser:
         if title in self._parse_cache:
             return self._parse_cache[title]
         
+        if len(title) > 2048:
+            return ParsedSubject(original=title, subject_name=title, display_title=title)
         result = self._parse_internal(title)
+        if len(self._parse_cache) >= 4096:
+            self._parse_cache.pop(next(iter(self._parse_cache)))
         self._parse_cache[title] = result
         return result
     

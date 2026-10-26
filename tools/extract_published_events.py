@@ -17,6 +17,10 @@ The script will:
 from __future__ import annotations
 
 import json
+try:
+    from tools.storage import atomic_write_json, update_json, file_lock
+except ImportError:
+    from storage import atomic_write_json, update_json, file_lock
 import os
 import pathlib
 import time
@@ -50,6 +54,8 @@ except Exception:
 
 # Import parserul inteligent pentru subiecte
 from subject_parser import get_parser, learn_from_events, expand_title
+from tools.calendar_security import validate_calendar_url
+from tools.browser_context import calendar_browser
 
 # Reuse the existing ICS parser from timetable so we can bypass Playwright when
 # the URL already points to a published .ics feed (these now trigger a direct
@@ -77,7 +83,8 @@ def main():
     if not url:
         # fallback default (kept for backwards compatibility)
         url = 'https://outlook.office365.com/calendar/published/173862b98010453296f2a697e45f3b1e@campus.utcluj.ro/daeb64d4bd994c52b4f54d04ba1940ca2236386271423118770/calendar.html'
-    user_data_dir = os.environ.get('PLAYWRIGHT_USER_DATA_DIR', os.path.expanduser('~/.playwright_profile'))
+    url = validate_calendar_url(url)
+    user_data_dir = os.environ.get('PLAYWRIGHT_USER_DATA_DIR', '(isolated temporary profile)')
     # Allow callers (e.g. concurrent extraction) to redirect output to a
     # per-URL temp directory so multiple Playwright instances don't clobber
     # each other's events.json.
@@ -88,7 +95,9 @@ def main():
     print('Extracting URL:', url)
 
     captured_json_texts = []
-    captured_urls = []
+    captured_urls = set()
+    capture_bytes = 0
+    capture_limit_exceeded = False
 
     # Fast-path: if the URL is already an .ics feed, fetch and parse it directly
     # using the existing timetable helper instead of spinning up Playwright.
@@ -129,18 +138,16 @@ def main():
                 iid = None
                 if isinstance(raw, dict):
                     iid = raw.get('ItemId', {}).get('Id') if raw.get('ItemId') else None
-                key = iid or (ev.get('title','') + '|' + (ev.get('start') or ''))
+                key = (iid or ev.get('title', ''), ev.get('start') or '')
                 if key not in seen_ids:
                     seen_ids.add(key)
                     deduped.append(ev)
 
             from subject_parser import get_mappings
             mappings_file = out_dir / 'subject_mappings.json'
-            with open(mappings_file, 'w', encoding='utf-8') as f:
-                json.dump(get_mappings(), f, indent=2, ensure_ascii=False)
+            atomic_write_json(mappings_file, get_mappings())
             out_file = out_dir / 'events.json'
-            with open(out_file, 'w', encoding='utf-8') as f:
-                json.dump(deduped, f, indent=2, ensure_ascii=False, default=str)
+            atomic_write_json(out_file, deduped)
             print('Saved extracted events to', out_file)
 
             # Pretty print summary
@@ -173,33 +180,34 @@ def main():
         except Exception as e:
             print('ICS parse failed, falling back to Playwright:', e)
 
-    with sync_playwright() as p:
-        # Use persistent context so we can reuse a logged-in session
-        context = p.chromium.launch_persistent_context(user_data_dir, headless=True)
+    with sync_playwright() as p, calendar_browser(p) as context:
         page = context.new_page()
 
         def on_response(resp):
+            nonlocal capture_bytes, capture_limit_exceeded
             try:
                 u = resp.url
                 if 'service.svc' in u and ('GetItem' in u or 'PublishedCalendar' in u or 'GetItems' in u):
-                    # attempt to read JSON body
+                    text = resp.text()
+                    body_size = len(text.encode('utf-8'))
+                    if body_size > 10 * 1024 * 1024 or capture_bytes + body_size > 40 * 1024 * 1024 or len(captured_json_texts) >= 2000:
+                        capture_limit_exceeded = True
+                        return
                     try:
-                        j = resp.json()
-                    except Exception:
-                        try:
-                            txt = resp.text()
-                            j = json.loads(txt)
-                        except Exception:
-                            j = None
+                        j = json.loads(text)
+                    except ValueError:
+                        return
                     if j is not None:
                         # avoid duplicates
-                        if u not in captured_urls:
-                            captured_urls.append(u)
+                        # Outlook posts different date windows/items to the same URL.
+                        key = (u, hashlib.sha256(text.encode('utf-8')).digest())
+                        if key not in captured_urls:
+                            captured_urls.add(key)
+                            capture_bytes += body_size
                             captured_json_texts.append(j)
                             idx = len(captured_json_texts) - 1
                             fname = out_dir / f'json_capture_{idx}.json'
-                            with open(fname, 'w', encoding='utf-8') as f:
-                                json.dump(j, f, indent=2, ensure_ascii=False)
+                            atomic_write_json(fname, j)
                             # attempt to include response diagnostics for debugging
                             try:
                                 status = getattr(resp, 'status', None)
@@ -219,7 +227,7 @@ def main():
         try:
             page.goto(url, wait_until='networkidle', timeout=60000)
         except Exception as e:
-            print('goto exception (continuing):', e)
+            raise RuntimeError('Calendar navigation failed; preserving previous events.') from e
 
         # give page a moment to load
         time.sleep(1.0)
@@ -318,7 +326,6 @@ def main():
         except Exception:
             pass
 
-        context.close()
 
     # parse captured JSONs into simple event dicts
     events = []
@@ -372,6 +379,11 @@ def main():
         except Exception as e:
             print('parse capture error', e)
 
+    if capture_limit_exceeded:
+        raise RuntimeError('Calendar capture exceeds resource limits; previous data retained.')
+    if not captured_json_texts:
+        raise RuntimeError('No calendar responses captured; preserving previous events.')
+
     # Învață mapping-urile din titlurile complete (ex: "Functional programming (FP) - ...")
     # și apoi expandează abrevierile în toate titlurile
     learned = learn_from_events(events)
@@ -392,7 +404,7 @@ def main():
         iid = None
         if isinstance(raw, dict):
             iid = raw.get('ItemId', {}).get('Id') if raw.get('ItemId') else None
-        key = iid or (ev.get('title','') + '|' + (ev.get('start') or ''))
+        key = (iid or ev.get('title', ''), ev.get('start') or '')
         if key not in seen_ids:
             seen_ids.add(key)
             deduped.append(ev)
@@ -400,14 +412,12 @@ def main():
     # Salvează și mapping-urile învățate pentru utilizare în UI
     from subject_parser import get_mappings
     mappings_file = out_dir / 'subject_mappings.json'
-    with open(mappings_file, 'w', encoding='utf-8') as f:
-        json.dump(get_mappings(), f, indent=2, ensure_ascii=False)
+    atomic_write_json(mappings_file, get_mappings())
     print(f'Saved subject mappings to {mappings_file}')
 
     # save results
     out_file = out_dir / 'events.json'
-    with open(out_file, 'w', encoding='utf-8') as f:
-        json.dump(deduped, f, indent=2, ensure_ascii=False, default=str)
+    atomic_write_json(out_file, deduped)
     print('Saved extracted events to', out_file)
 
     # pretty-print a small timetable summary

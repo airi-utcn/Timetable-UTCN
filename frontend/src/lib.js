@@ -104,6 +104,13 @@ export function localDateStr(d) {
   return `${y}-${m}-${day}`
 }
 
+/** Add calendar days without losing or skipping dates across DST changes. */
+export function addLocalDays(value, days) {
+  const result = new Date(value)
+  result.setDate(result.getDate() + days)
+  return result
+}
+
 /**
  * Event status relative to `now`:
  *  ongoing  – started, not ended
@@ -116,7 +123,7 @@ export function eventStatus(ev, now = new Date()) {
   try {
     const s = new Date(ev.start)
     const e = ev.end ? new Date(ev.end) : null
-    if (e && now > e) return { key: 'finished', text: 'Finished' }
+    if (e && now >= e) return { key: 'finished', text: 'Finished' }
     if (now >= s) {
       if (e) {
         const left = Math.max(1, Math.round((e - now) / 60000))

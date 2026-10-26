@@ -1,5 +1,15 @@
 #!/bin/bash
-set -e
+set -euo pipefail
+
+# Root is needed only to initialize named-volume ownership. Run all application
+# setup, extraction, and serving as the runtime user, with literal argv.
+if [ "$(id -u)" = "0" ]; then
+    mkdir -p /app/data /app/config /app/playwright_captures /app/playwright_data
+    chown -R appuser:appuser /app/data /app/config /app/playwright_captures /app/playwright_data
+    exec runuser -u appuser -- "$0" "$@"
+fi
+cd /app
+python3 -c 'import app'  # Validate production secrets before changing state.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Entrypoint for UTCN Timetable container
@@ -80,9 +90,6 @@ python3 /app/tools/audit_calendars.py || echo "  ⚠ Audit reported problems (se
 
 echo "✅ Setup complete"
 
-# Ensure app files are owned by the non-root runtime user
-chown -R appuser:appuser /app || true
-
 # ── Auto-start detached full extraction ──
 PIDFILE=/app/playwright_captures/extract_detached.pid
 echo "⏳ Checking for existing detached extractor..."
@@ -96,12 +103,13 @@ if [ -f "$PIDFILE" ]; then
     fi
 fi
 
-if [ ! -f "$PIDFILE" ]; then
+if [ ! -f "$PIDFILE" ] && [ "${DISABLE_BACKGROUND_TASKS:-0}" != "1" ]; then
     ENABLED_COUNT=$(python3 /app/tools/get_enabled_count.py 2>/dev/null || echo 0)
     echo "  Enabled calendars in DB: ${ENABLED_COUNT}"
     if [ "${ENABLED_COUNT}" -gt 0 ]; then
         echo "  🚀 Starting detached full extraction as appuser..."
-        su -s /bin/bash appuser -c "cd /app && mkdir -p /app/playwright_captures && nohup python3 /app/tools/run_full_extraction.py > /app/playwright_captures/extract_stdout.txt 2>/app/playwright_captures/extract_stderr.txt & echo \$! > /app/playwright_captures/extract_detached.pid" || true
+        nohup python3 /app/tools/run_full_extraction.py > /app/playwright_captures/extract_stdout.txt 2>/app/playwright_captures/extract_stderr.txt &
+        echo "$!" > /app/playwright_captures/extract_detached.pid
         echo "  ✓ Detached extractor started"
     else
         echo "  ⚠ No enabled calendars - skipping extraction"
@@ -128,22 +136,22 @@ if [ "$1" = "gunicorn" ]; then
     echo "║  Total concurrent slots: $((WORKERS * THREADS))"
     echo "╚══════════════════════════════════════════════════════════════╝"
 
-    exec su -s /bin/bash appuser -c "exec gunicorn \
+    exec gunicorn \
         --bind 0.0.0.0:5000 \
-        --workers $WORKERS \
-        --threads $THREADS \
-        --worker-class $WORKER_CLASS \
-        --timeout $TIMEOUT \
-        --keep-alive $KEEPALIVE \
-        --max-requests $MAX_REQUESTS \
-        --max-requests-jitter $MAX_REQUESTS_JITTER \
+        --workers "$WORKERS" \
+        --threads "$THREADS" \
+        --worker-class "$WORKER_CLASS" \
+        --timeout "$TIMEOUT" \
+        --keep-alive "$KEEPALIVE" \
+        --max-requests "$MAX_REQUESTS" \
+        --max-requests-jitter "$MAX_REQUESTS_JITTER" \
         --access-logfile - \
         --error-logfile - \
         --log-level info \
         --preload \
-        --forwarded-allow-ips='*' \
-        app:app"
+        --forwarded-allow-ips="${FORWARDED_ALLOW_IPS:-127.0.0.1,::1}" \
+        app:app
 else
     # Fallback: run whatever command was passed
-    exec su -s /bin/bash appuser -c "$*"
+    exec "$@"
 fi

@@ -52,3 +52,16 @@ pytest.ini
 # Documentation duplicates
 README\ 2.md
 .env
+
+# Runtime state, credentials, and all local virtual environments
+.venv*/
+data/
+playwright_captures/
+.playwright_profile/
+playwright_data/
+cookies.txt
+get.html
+*.csv.bak.*
+.env.*
+!.env.example
+*.csv.bak

@@ -21,6 +21,10 @@ import sys
 import subprocess
 import hashlib
 import json
+try:
+    from tools.storage import atomic_write_json, update_json, file_lock
+except ImportError:
+    from storage import atomic_write_json, update_json, file_lock
 import sqlite3
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -108,11 +112,13 @@ def run_extractor_for_url(url: str, env: Dict[str, str]) -> bool:
     h = sha8(url)
     tmp_out = OUT / f'_tmp_{h}'
     tmp_out.mkdir(parents=True, exist_ok=True)
+    (tmp_out / 'events.json').unlink(missing_ok=True)
+    (OUT / f'events_{h}.tmp.json').unlink(missing_ok=True)
     sub_env = dict(env)
     sub_env['EXTRACT_OUTPUT_DIR'] = str(tmp_out)
     cmd = [sys.executable, str(ROOT / 'tools' / 'extract_published_events.py'), url]
     try:
-        proc = subprocess.run(cmd, check=False, env=sub_env)
+        proc = subprocess.run(cmd, check=False, env=sub_env, timeout=300)
         ok = proc.returncode == 0
     except Exception:
         ok = False
@@ -120,7 +126,7 @@ def run_extractor_for_url(url: str, env: Dict[str, str]) -> bool:
     # so merge_future_events can pick it up without races.
     tmp_events = tmp_out / 'events.json'
     staging = OUT / f'events_{h}.tmp.json'
-    if tmp_events.exists():
+    if ok and tmp_events.exists():
         try:
             if staging.exists():
                 staging.unlink()
@@ -143,6 +149,16 @@ def merge_future_events(url: str):
     tmp_in = OUT / f'events_{h}.tmp.json'
     today_dt = date.today()
 
+    # Never replace authoritative data without a valid successful staging file.
+    if not tmp_in.exists():
+        return
+    try:
+        new = json.loads(tmp_in.read_text(encoding='utf-8'))
+        if not isinstance(new, list):
+            return
+    except (ValueError, OSError):
+        return
+
     # Load existing events (if any)
     existing = load_json(out_file) if out_file.exists() else []
     # Keep past events within the ±60 day window (don't accumulate unbounded history)
@@ -163,15 +179,14 @@ def merge_future_events(url: str):
         past.append(e)
 
     # Load newly extracted events (if any)
-    new = load_json(tmp_in) if tmp_in.exists() else []
     new_future = [e for e in new if is_future_event(e, today_dt)]
 
     # Merge: keep past, append new_future, dedupe by (ItemId or title+start)
-    merged = past + new_future
     merged_candidates = past + new_future
     # try to enrich events missing location from calendar_map or DB
     cmap = load_calendar_map(DB, OUT)
     for ev in merged_candidates:
+        ev['source'] = h
         try:
             if not ev.get('location') or ev.get('location') in ('', ' - ', None):
                 meta = None
@@ -191,7 +206,7 @@ def merge_future_events(url: str):
                         ev['location'] = name_meta
         except Exception:
             pass
-    seen = set()
+    seen = {}
     deduped = []
 
     def score_event(e):
@@ -217,20 +232,11 @@ def merge_future_events(url: str):
                 iid = None
         key = iid or ((ev.get('title') or '') + '|' + (ev.get('start') or ''))
         if key in seen:
-            # find previous and replace if current has a better score
-            for i, existing in enumerate(deduped):
-                try:
-                    raw_ex = existing.get('raw') or {}
-                    iid_ex = raw_ex.get('ItemId', {}).get('Id') if raw_ex.get('ItemId') else None
-                except Exception:
-                    iid_ex = None
-                key_ex = iid_ex or ((existing.get('title') or '') + '|' + (existing.get('start') or ''))
-                if key_ex == key:
-                    if score_event(ev) > score_event(existing):
-                        deduped[i] = ev
-                    break
+            index = seen[key]
+            if score_event(ev) > score_event(deduped[index]):
+                deduped[index] = ev
             continue
-        seen.add(key)
+        seen[key] = len(deduped)
         deduped.append(ev)
 
     # Save merged file
@@ -246,7 +252,7 @@ def merge_future_events(url: str):
 def rebuild_schedule(from_d: date, to_d: date, env: Dict[str, str]):
     cmd = [sys.executable, str(ROOT / 'tools' / 'build_schedule_by_room.py'), '--from', from_d.isoformat(), '--to', to_d.isoformat()]
     try:
-        subprocess.run(cmd, check=False, env=env)
+        subprocess.run(cmd, check=True, env=env, timeout=300)
     except Exception as e:
         print('Schedule rebuild failed:', e)
 
@@ -273,6 +279,10 @@ def main():
         _lock = threading.Lock()
 
         def extract_and_merge(cal):
+            with file_lock(OUT / f'.calendar_{sha8(cal["url"])}.lock'):
+                return _extract_and_merge(cal)
+
+        def _extract_and_merge(cal):
             url = cal['url']
             name = cal.get('name') or url
             print(f'  → Extracting: {name}')
@@ -283,8 +293,9 @@ def main():
                 print(f'  ✗ Extractor failed for: {url}')
             else:
                 print(f'  ✓ Extractor OK for: {name}')
-            # merge/update per-calendar file preserving past
-            merge_future_events(url)
+            # A failed fetch must leave all existing future bookings intact.
+            if ok:
+                merge_future_events(url)
             return ok
 
         with ThreadPoolExecutor(max_workers=PW_CONCURRENCY) as pool:
@@ -305,7 +316,7 @@ def main():
         # Rebuild schedule for -60d .. +60d
         today = date.today()
         from_d = today - timedelta(days=60)
-        to_d = today + timedelta(days=60)
+        to_d = today + timedelta(days=int(os.environ.get('EXTRACT_FUTURE_DAYS', '240')))
         print('Rebuilding schedule', from_d.isoformat(), '->', to_d.isoformat())
         rebuild_schedule(from_d, to_d, env)
 

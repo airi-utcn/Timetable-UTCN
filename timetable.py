@@ -44,9 +44,8 @@ class Event:
 
 
 def fetch(url: str) -> str:
-    resp = requests.get(url)
-    resp.raise_for_status()
-    return resp.text
+    from tools.ics_fetch import fetch_text
+    return fetch_text(url)
 
 
 def find_ics_url_from_html(html: str, base_url: str) -> Optional[str]:
@@ -142,11 +141,9 @@ def parse_ics_from_url(ics_url: str, verbose: bool = False,
         raise RuntimeError("ics library not installed; please pip install -r requirements.txt")
 
     headers = {"Accept": "text/calendar, text/plain, */*;q=0.1"}
-    resp = requests.get(ics_url, headers=headers, timeout=(10, 45))
-    resp.raise_for_status()
-
-    body = resp.text
-    ct = resp.headers.get("Content-Type", "")
+    from tools.ics_fetch import fetch_text
+    body = fetch_text(ics_url)
+    ct = "text/calendar"
     if body.lstrip().upper().startswith("BEGIN:VCALENDAR") or "text/calendar" in ct:
         cal = Calendar(body)
         events = []

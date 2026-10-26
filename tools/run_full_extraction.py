@@ -19,6 +19,10 @@ Pipeline guarantees:
     failed, zero-event rooms, and whether numeric rooms (e.g. "40") are in.
 """
 import json
+try:
+    from tools.storage import atomic_write_json, update_json, file_lock
+except ImportError:
+    from storage import atomic_write_json, update_json, file_lock
 import os
 import pathlib
 import sqlite3
@@ -78,18 +82,7 @@ _map_lock = threading.Lock()
 
 def update_calendar_map(entries: dict):
     """Merge entries (hash -> metadata) into calendar_map.json atomically."""
-    map_path = OUT_DIR / 'calendar_map.json'
-    with _map_lock:
-        cmap = {}
-        if map_path.exists():
-            try:
-                cmap = json.loads(map_path.read_text(encoding='utf-8'))
-            except Exception:
-                cmap = {}
-        cmap.update(entries)
-        tmp = map_path.with_suffix('.json.tmp')
-        tmp.write_text(json.dumps(cmap, indent=2, ensure_ascii=False), encoding='utf-8')
-        tmp.replace(map_path)
+    update_json(OUT_DIR / 'calendar_map.json', lambda current: {**current, **entries})
 
 
 def write_events_file(h: str, events: list, cal: dict):
@@ -99,13 +92,18 @@ def write_events_file(h: str, events: list, cal: dict):
         if cal.get('color'):
             ev['color'] = cal['color']
     ev_out = OUT_DIR / f'events_{h}.json'
-    tmp = ev_out.with_suffix('.json.tmp')
-    with open(tmp, 'w', encoding='utf-8') as f:
-        json.dump(events, f, indent=2, ensure_ascii=False, default=str)
-    tmp.replace(ev_out)
+    atomic_write_json(ev_out, events)
 
 
 def main():
+    with file_lock(OUT_DIR / '.full_extraction.lock', blocking=False) as acquired:
+        if not acquired:
+            print('Another full extraction is already running.')
+            return 0
+        return _main()
+
+
+def _main():
     calendars = get_enabled_calendars(DB)
     total = len(calendars)
     if not calendars:
@@ -139,8 +137,7 @@ def main():
     def write_progress(last=None):
         try:
             info = {'total': total, 'succeeded': ok, 'failed': fail, 'last': last}
-            with open(progress_path, 'w', encoding='utf-8') as pf:
-                json.dump(info, pf, indent=2, ensure_ascii=False)
+            atomic_write_json(progress_path, info)
         except Exception as e:
             print('Failed to write progress file:', e)
 
@@ -148,6 +145,10 @@ def main():
     playwright_queue = []
 
     def try_ics_only(cal: dict):
+        with file_lock(OUT_DIR / f'.calendar_{sha8(cal["url"])}.lock'):
+            return _try_ics_only(cal)
+
+    def _try_ics_only(cal: dict):
         url = cal['url']
         name = cal.get('name') or url
         h = sha8(url)
@@ -202,12 +203,17 @@ def main():
               f'(concurrency={pw_concurrency})...')
 
         def run_playwright_for(cal: dict):
+            with file_lock(OUT_DIR / f'.calendar_{sha8(cal["url"])}.lock'):
+                return _run_playwright_for(cal)
+
+        def _run_playwright_for(cal: dict):
             url = cal['url']
             name = cal.get('name') or url
             pw_url = cal.get('html_url') or url
             h = sha8(url)  # hash is always based on the primary (ICS) URL
             tmp_out = OUT_DIR / f'_tmp_{h}'
             tmp_out.mkdir(parents=True, exist_ok=True)
+            (tmp_out / 'events.json').unlink(missing_ok=True)
             sub_env = dict(env)
             sub_env['EXTRACT_OUTPUT_DIR'] = str(tmp_out)
             cmd = [sys.executable, str(pathlib.Path('tools') / 'extract_published_events.py'), pw_url]
@@ -225,11 +231,13 @@ def main():
             ev_in = tmp_out / 'events.json'
             n_events = None
             success = False
-            if ev_in.exists():
+            if rc == 0 and ev_in.exists():
                 try:
                     data = json.loads(ev_in.read_text(encoding='utf-8'))
-                except Exception:
-                    data = []
+                except (ValueError, OSError):
+                    return (cal, False, None)
+                if not isinstance(data, list):
+                    return (cal, False, None)
                 write_events_file(h, data, cal)
                 update_calendar_map({h: {
                     'url': url,
@@ -242,7 +250,7 @@ def main():
                 success = True
                 print(f'  ✓ Playwright OK: {name} ({n_events} events)')
             else:
-                success = (rc == 0)
+                success = False
                 if not success:
                     print(f'  ✗ Playwright produced no events.json: {name}')
             try:
@@ -298,8 +306,7 @@ def main():
         'room_40_included': has_room_40,
     }
     try:
-        with open(OUT_DIR / 'extraction_report.json', 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
+        atomic_write_json(OUT_DIR / 'extraction_report.json', report)
     except Exception as e:
         print('Failed to write extraction report:', e)
 
@@ -308,7 +315,9 @@ def main():
     cmd = [sys.executable, str(pathlib.Path('tools') / 'build_schedule_by_room.py'),
            '--from', from_d.isoformat(), '--to', to_d.isoformat()]
     try:
-        subprocess.run(cmd, check=False, timeout=300)
+        result = subprocess.run(cmd, check=False, timeout=300)
+        if result.returncode not in (0, 2):
+            raise RuntimeError(f'Schedule builder exited with {result.returncode}')
         print('Schedule rebuild finished (check playwright_captures/schedule_by_room.json)')
     except Exception as e:
         print('Schedule rebuild failed:', e)
@@ -338,8 +347,7 @@ def main():
             prog['files_count'] = files_count
             prog['finished'] = True
             prog['finished_at'] = datetime.utcnow().isoformat() + 'Z'
-            with open(progress_path, 'w', encoding='utf-8') as pf:
-                json.dump(prog, pf, indent=2, ensure_ascii=False)
+            atomic_write_json(progress_path, prog)
 
             with open(tmp, 'w', encoding='utf-8') as mf:
                 mf.write('Import complete\n')
@@ -349,7 +357,7 @@ def main():
     except Exception as e:
         print('Error while finalizing import marker:', e)
 
-    return 0
+    return 0 if ok > 0 and fail == 0 else 1
 
 
 if __name__ == '__main__':

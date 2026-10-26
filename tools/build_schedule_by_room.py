@@ -27,6 +27,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import io
+try:
+    from tools.storage import atomic_write_json, atomic_write_bytes, update_json, file_lock
+except ImportError:
+    from storage import atomic_write_json, atomic_write_bytes, update_json, file_lock
 import os
 from collections import defaultdict
 from datetime import date, datetime, timedelta
@@ -473,20 +478,25 @@ def save_outputs(schedule, out_dir: pathlib.Path):
                     'parse_warnings': e.get('parse_warnings'),
                 })
     # atomic write so readers never see a half-written schedule
-    tmp_jpath = jpath.with_suffix('.json.tmp')
-    with open(tmp_jpath, 'w', encoding='utf-8') as f:
-        json.dump(serial, f, indent=2, ensure_ascii=False)
-    tmp_jpath.replace(jpath)
+    atomic_write_json(jpath, serial)
 
     # also CSV: room, date, start, end, subject, title, location
     cpath = out_dir / 'schedule_by_room.csv'
-    with open(cpath, 'w', encoding='utf-8', newline='') as f:
-        w = csv.writer(f)
-        w.writerow(['room', 'date', 'start', 'end', 'subject', 'professor', 'title', 'location'])
-        for room, days in serial.items():
-            for day, evs in days.items():
-                for e in evs:
-                    w.writerow([room, day, e.get('start'), e.get('end'), e.get('subject'), e.get('professor'), e.get('title'), e.get('location')])
+    buffer = io.StringIO(newline='')
+    writer = csv.writer(buffer)
+    writer.writerow(['room', 'date', 'start', 'end', 'subject', 'professor', 'title', 'location'])
+    def safe_cell(value):
+        if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
+            return "'" + value
+        return value
+    for room, days in serial.items():
+        for day, evs in days.items():
+            for event in evs:
+                writer.writerow([safe_cell(value) for value in [
+                    room, day, event.get('start'), event.get('end'), event.get('subject'),
+                    event.get('professor'), event.get('title'), event.get('location'),
+                ]])
+    atomic_write_bytes(cpath, buffer.getvalue().encode('utf-8'))
 
     return jpath, cpath
 
@@ -529,47 +539,27 @@ def parse_args():
 
 
 def load_all_events(source_path: str):
-    """Load events from source. If source is a directory or doesn't exist,
-    load all events_*.json files from playwright_captures/ directory."""
-    all_events = []
-    out_dir = pathlib.Path('playwright_captures')
-    
-    # Try to load individual events_*.json files first (multi-calendar setup)
-    event_files = list(out_dir.glob('events_*.json'))
-    
-    if event_files:
-        print(f'Found {len(event_files)} calendar event files')
-        for ef in event_files:
-            try:
-                events = load_events(str(ef))
-                print(f'  Loaded {len(events)} events from {ef.name}')
-                all_events.extend(events)
-            except Exception as e:
-                print(f'  Error loading {ef.name}: {e}')
-    
-    # Fallback: also try the main events.json if it exists
-    main_events_file = pathlib.Path(source_path)
-    if main_events_file.exists() and main_events_file.name == 'events.json':
+    """Per-calendar snapshots are authoritative; merged legacy output is fallback.
+
+    Combining stale merged output with fresh feeds resurrected deleted bookings.
+    Explicit files and source directories are also honored for maintenance jobs.
+    """
+    source = pathlib.Path(source_path)
+    default = pathlib.Path('playwright_captures/events.json')
+    if source.is_file() and source != default:
+        return load_events(str(source))
+    directory = source if source.is_dir() else source.parent
+    event_files = sorted(p for p in directory.glob('events_*.json')
+                         if not p.name.endswith('.tmp.json'))
+    if not event_files:
+        return load_events(str(source)) if source.is_file() else []
+    events = []
+    for path in event_files:
         try:
-            events = load_events(str(main_events_file))
-            # Avoid duplicates if these events are already in events_*.json
-            # Check by comparing (start, title) tuples
-            existing = set()
-            for e in all_events:
-                key = (str(e.get('start')), e.get('title'))
-                existing.add(key)
-            new_count = 0
-            for e in events:
-                key = (str(e.get('start')), e.get('title'))
-                if key not in existing:
-                    all_events.append(e)
-                    new_count += 1
-            if new_count > 0:
-                print(f'  Added {new_count} additional events from events.json')
-        except Exception:
-            pass
-    
-    return all_events
+            events.extend(load_events(str(path)))
+        except (OSError, ValueError, TypeError) as exc:
+            print(f'Could not read {path.name}: {exc}')
+    return events
 
 
 def main():
@@ -586,6 +576,7 @@ def main():
     
     if not events:
         print('No events found in any source files')
+        save_outputs({}, pathlib.Path('playwright_captures'))
         return 2
     
     print(f'Total events loaded: {len(events)}')
@@ -615,4 +606,5 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    with file_lock(pathlib.Path('playwright_captures') / '.schedule_publish.lock'):
+        sys.exit(main())

@@ -1,13 +1,13 @@
-requests>=2.25.0
-beautifulsoup4>=4.9.0
-ics>=0.7
+requests>=2.34.2,<3
+beautifulsoup4>=4.15,<5
+ics>=0.7.3,<0.8
 # ics 0.7.x requires tatsu <5.9; newer releases break import with ParserConfig buffer_class
 tatsu>=5.8,<5.9
 # Primary ICS parser: resolves VTIMEZONE and expands RRULE recurrences
-icalendar>=5.0
-recurring-ical-events>=2.1
-python-dateutil>=2.8.0
-Flask>=2.0.0
-playwright>=1.40.0
-gunicorn>=21.0.0
-python-dotenv>=1.0.0
+icalendar>=7.3,<8
+recurring-ical-events>=3.8.2,<4
+python-dateutil>=2.9,<3
+Flask>=3.1.3,<4
+playwright>=1.64.1,<2
+gunicorn>=26.2,<27
+python-dotenv>=1.2.4,<2

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
-  formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
+  formatHM, localDateStr, addLocalDays, eventStatus, activityType, TYPE_LABELS,
   typeChipClass, groupDisplay, roomDisplay, progressPct, displayCalendarName,
 } from './lib'
 
@@ -61,6 +61,7 @@ export default function Schedule() {
   const [weekOffset, setWeekOffset] = useState(0)
   const [now, setNow] = useState(new Date())
   const abortRef = useRef(null)
+  const allEventsCacheRef = useRef(null)
 
   // refresh statuses every minute without refetching
   useEffect(() => {
@@ -102,7 +103,7 @@ export default function Schedule() {
             name: info.name || hash,
             room: info.room || '',
           }
-          enabled[hash] = true
+          enabled[hash] = info.enabled !== 0
         })
         setCalendars(calMap)
         setEnabledCalendars(prev => {
@@ -120,7 +121,7 @@ export default function Schedule() {
 
   const findNearestDayWithEvents = useCallback((allEvts) => {
     if (!allEvts || allEvts.length === 0) return null
-    const today = new Date().toISOString().split('T')[0]
+    const today = localDateStr(new Date())
     const dates = [...new Set(
       allEvts.filter(ev => ev.start && ev.start.split('T')[0] >= today)
         .map(ev => ev.start.split('T')[0])
@@ -128,8 +129,6 @@ export default function Schedule() {
     return dates.length > 0 ? dates[0] : null
   }, [])
 
-  // NOTE: fetch params intentionally use toISOString-based dates to stay
-  // consistent with the backend contract and the existing test-suite.
   const fetchEvents = useCallback(async (opts = {}) => {
     if (abortRef.current) abortRef.current.abort()
     const ctrl = new AbortController()
@@ -137,32 +136,29 @@ export default function Schedule() {
     try {
       setLoading(true)
       const today = new Date()
-      const todayStr = today.toISOString().split('T')[0]
+      const todayStr = localDateStr(today)
       const scope = opts.scope || null
 
       let fromDate, toDate
-      if (scope === 'currentWeek' || viewMode === 'calendar' || viewMode === 'week') {
-        const weekStart = getWeekStart(today, weekOffset)
-        const weekEnd = new Date(weekStart)
-        weekEnd.setDate(weekEnd.getDate() + 6)
-        fromDate = weekStart.toISOString().split('T')[0]
-        toDate = weekEnd.toISOString().split('T')[0]
-      } else if (scope === 'twoMonthsAll') {
+      if (scope === 'twoMonthsAll') {
         fromDate = todayStr
-        toDate = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+        toDate = localDateStr(addLocalDays(today, 60))
+      } else if (scope === 'currentWeek' || viewMode === 'calendar' || viewMode === 'week') {
+        const weekStart = getWeekStart(today, weekOffset)
+        fromDate = localDateStr(weekStart)
+        toDate = localDateStr(addLocalDays(weekStart, 6))
       } else {
-        // day mode
         fromDate = todayStr
         toDate = todayStr
       }
 
       const force = opts && opts.force
       let fetchFrom = fromDate
-      if (!force && scope !== 'twoMonthsAll' && scope !== 'currentWeek' && viewMode !== 'calendar') {
+      if (!force && scope !== 'twoMonthsAll' && scope !== 'currentWeek' && viewMode === 'day') {
         if (new Date(fetchFrom) < new Date(todayStr)) fetchFrom = todayStr
       }
 
-      const twoMonthsEnd = new Date(Date.now() + 60 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
+      const twoMonthsEnd = localDateStr(addLocalDays(today, 60))
 
       const params = new URLSearchParams({ from: fetchFrom, to: toDate })
       if (filters.subject) params.set('subject', filters.subject)
@@ -175,14 +171,20 @@ export default function Schedule() {
       let evts = await res.json()
       if (!Array.isArray(evts)) evts = []
 
-      // 2-month window (for nearest-day lookup, search suggestions, legend)
-      let allEvts = []
-      const allParams = new URLSearchParams({ from: todayStr, to: twoMonthsEnd })
-      const allRes = await fetch('/events.json?' + allParams.toString(), { signal: ctrl.signal })
-      if (allRes.ok) {
-        const allData = await allRes.json()
-        allEvts = Array.isArray(allData) ? allData : []
+      // Reuse the unfiltered lookahead while typing filters or browsing weeks.
+      const cached = allEventsCacheRef.current
+      let allEvts = cached && cached.day === todayStr && cached.expires > Date.now() && !force
+        ? cached.events : null
+      if (!allEvts) {
+        const allParams = new URLSearchParams({ from: todayStr, to: twoMonthsEnd })
+        const allRes = await fetch('/events.json?' + allParams.toString(), { signal: ctrl.signal })
+        if (allRes.ok) {
+          const allData = await allRes.json()
+          allEvts = Array.isArray(allData) ? allData : []
+          if (!ctrl.signal.aborted) allEventsCacheRef.current = { day: todayStr, expires: Date.now() + 3600000, events: allEvts }
+        } else allEvts = []
       }
+      if (ctrl.signal.aborted) return
       setAllEvents(allEvts)
 
       // empty view → jump to nearest day that has events
@@ -191,7 +193,7 @@ export default function Schedule() {
         if (nearest) {
           setNearestDay(nearest)
           const nearestEnd = viewMode === 'week'
-            ? new Date(new Date(nearest).getTime() + 7 * 86400000).toISOString().split('T')[0]
+            ? localDateStr(addLocalDays(new Date(nearest + 'T12:00:00'), 6))
             : nearest
           const nearestParams = new URLSearchParams({ from: nearest, to: nearestEnd })
           if (filters.subject) nearestParams.set('subject', filters.subject)
@@ -220,6 +222,7 @@ export default function Schedule() {
       }
       evts.forEach(ev => { if (!ev.color) ev.color = colorFor(ev.source || 'default') })
 
+      if (ctrl.signal.aborted) return
       setEvents(evts)
       setLastUpdate(new Date())
       setNow(new Date())
@@ -228,14 +231,15 @@ export default function Schedule() {
       if (err && err.name === 'AbortError') return
       setError(err.message)
     } finally {
-      setLoading(false)
+      if (!ctrl.signal.aborted) setLoading(false)
     }
   }, [filters, viewMode, weekOffset, getWeekStart, findNearestDayWithEvents, calendars])
 
   useEffect(() => {
-    fetchEvents({ scope: 'currentWeek' })
-    const interval = setInterval(() => fetchEvents({ scope: 'currentWeek' }), 3600000)
+    const debounce = setTimeout(() => fetchEvents(), 250)
+    const interval = setInterval(() => fetchEvents(), 3600000)
     return () => {
+      clearTimeout(debounce)
       clearInterval(interval)
       if (abortRef.current) abortRef.current.abort()
     }
@@ -310,7 +314,7 @@ export default function Schedule() {
 
   const sortedDates = Object.keys(groupedByDate).sort()
   const todayLocal = localDateStr(now)
-  const tomorrowLocal = localDateStr(new Date(now.getTime() + 86400000))
+  const tomorrowLocal = localDateStr(addLocalDays(now, 1))
 
   const formatDateHeader = (dateStr) => {
     try {

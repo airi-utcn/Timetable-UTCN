@@ -6,6 +6,7 @@ const backendTarget = process.env.VITE_BACKEND_URL || 'http://127.0.0.1:5000'
 export default defineConfig({
   plugins: [react()],
   base: '/',
+  test: { environment: 'jsdom', globals: true },
   server: {
     proxy: {
       '/events.json': backendTarget,
@@ -16,6 +17,7 @@ export default defineConfig({
     }
   },
   build: {
+    manifest: true,
     outDir: 'dist',
     emptyDirBeforeWrite: true,
     // target a reasonably modern ES version for broad compatibility
@@ -31,6 +33,7 @@ export default defineConfig({
     cssCodeSplit: true,
     // Rollup options for optimal chunk splitting
     rollupOptions: {
+      input: { main: 'index.html', admin: 'src/admin-shell.js' },
       output: {
         // Split vendor chunks for better caching
         manualChunks: {

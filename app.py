@@ -16,7 +16,7 @@ import functools
 import csv
 from datetime import datetime, date, timedelta
 from typing import List, Dict, Optional
-import signal
+import re
 
 # Load environment from .env if present (local/dev convenience)
 try:
@@ -25,10 +25,9 @@ try:
 except Exception:
     pass
 
-from flask import Flask, render_template, request, redirect, url_for, send_file, send_from_directory, jsonify, session, Response
+from flask import Flask, render_template, request, redirect, url_for, send_file, send_from_directory, jsonify, session, Response, g
 import hmac
 import secrets
-from collections import deque
 
 from timetable import (
     Event,
@@ -39,7 +38,28 @@ from timetable import (
 )
 
 app = Flask(__name__)
-app.config["SECRET_KEY"] = os.environ.get("FLASK_SECRET", "dev-secret")
+# Production must have stable, explicitly configured credentials across workers.
+_secret = os.environ.get('FLASK_SECRET', '')
+_password = os.environ.get('ADMIN_PASSWORD', '')
+_weak_secrets = {'dev-secret', 'change-me-in-production', 'change-this-to-a-random-string'}
+_weak_passwords = {'admin123', 'your-secure-password-here', 'change-this-password'}
+_production = os.environ.get('FLASK_ENV') == 'production'
+if _production and (len(_secret) < 32 or _secret in _weak_secrets):
+    raise RuntimeError('Set FLASK_SECRET to a random secret of at least 32 characters.')
+if _production and (len(_password) < 12 or _password in _weak_passwords):
+    raise RuntimeError('Set ADMIN_PASSWORD to a unique password of at least 12 characters.')
+app.config.update(
+    SECRET_KEY=_secret if _secret and _secret not in _weak_secrets else secrets.token_hex(32),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    SESSION_COOKIE_SECURE=os.environ.get('SESSION_COOKIE_SECURE', '0') == '1',
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+    MAX_FORM_MEMORY_SIZE=64 * 1024,
+    MAX_FORM_PARTS=100,
+)
+
+from tools.calendar_security import validate_calendar_url, UnsafeCalendarURL
+from tools.storage import atomic_write_json, update_json, file_lock
 
 # ── Performance: JSON response settings ──
 # Use compact JSON separators (no spaces) to reduce response size ~15%
@@ -75,167 +95,150 @@ _INDEX_CACHE_TTL = 30  # seconds between stat checks
 
 
 def _read_json_cached(file_path: str, ttl: int = _FILE_CACHE_TTL):
-    """Read and cache a JSON file, re-reading only when mtime changes."""
-    now = time.time()
+    """Return shared read-only JSON data; one thread reloads each cache miss.
+
+    Bound entries, detect atomic replacements and evict deleted files. Holding
+    the lock during reload prevents a thundering herd of JSON parses.
+    """
+    file_path = str(pathlib.Path(file_path).resolve())
+    now = time.monotonic()
     with _file_cache_lock:
         entry = _file_cache.get(file_path)
-        if entry and (now - entry['ts']) < ttl:
+        if entry and now - entry['ts'] < ttl:
             return entry['data']
-
-    try:
-        p = pathlib.Path(file_path)
-        if not p.exists():
+        try:
+            stat = pathlib.Path(file_path).stat()
+            fingerprint = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+        except FileNotFoundError:
+            _file_cache.pop(file_path, None)
             return None
-        mtime = p.stat().st_mtime
-        with _file_cache_lock:
-            entry = _file_cache.get(file_path)
-            if entry and entry['mtime'] == mtime:
-                entry['ts'] = now
-                return entry['data']
-        with open(p, 'r', encoding='utf-8') as f:
-            data = json.load(f)
-        with _file_cache_lock:
-            _file_cache[file_path] = {'data': data, 'mtime': mtime, 'ts': now}
+        except OSError:
+            return None
+        if entry and entry['mtime'] == fingerprint:
+            entry['ts'] = now
+            return entry['data']
+        try:
+            with open(file_path, encoding='utf-8') as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return None
+        if len(_file_cache) >= 256 and file_path not in _file_cache:
+            oldest = min(_file_cache, key=lambda key: _file_cache[key]['ts'])
+            _file_cache.pop(oldest)
+        _file_cache[file_path] = {'data': data, 'mtime': fingerprint, 'ts': now}
         return data
-    except Exception:
-        return None
 
 
-# Admin authentication
-# Defaults kept to preserve existing tests; change via env in production
-_raw_user = os.environ.get("ADMIN_USERNAME", "").strip().strip('\'"')
-_raw_pass = os.environ.get("ADMIN_PASSWORD", "").strip().strip('\'"')
-ADMIN_USERNAME = _raw_user if _raw_user else "admin"
-ADMIN_PASSWORD = _raw_pass if _raw_pass else "admin123"
-ADMIN_SESSION_TIMEOUT = int(os.environ.get("ADMIN_SESSION_TIMEOUT", 3600))  # seconds
-
-# Debug: Print loaded admin configured credentials length to verify loading.
-print(f"[INIT] Admin username configured: '{ADMIN_USERNAME}' (password length: {len(ADMIN_PASSWORD)})", flush=True)
-
-# Simple in-memory rate limiter for failed admin auth attempts by remote IP.
-# Keeps recent failure timestamps (seconds) and blocks after a threshold.
-_FAILED_ADMIN = {}
-_FAILED_WINDOW_SECONDS = 300  # 5 minutes
-_FAILED_THRESHOLD = 10  # block after 10 failed attempts in window
+# No default password: admin access stays disabled until configured.
+ADMIN_USERNAME = os.environ.get('ADMIN_USERNAME', 'admin')
+ADMIN_PASSWORD = _password if _password not in _weak_passwords else ''
+ADMIN_SESSION_TIMEOUT = int(os.environ.get('ADMIN_SESSION_TIMEOUT', 3600))
+_FAILED_WINDOW_SECONDS = 300
+_FAILED_THRESHOLD = 10
 
 
 def _is_ip_blocked(ip: str) -> bool:
-    if not ip:
-        return False
-    dq = _FAILED_ADMIN.get(ip)
-    if not dq:
-        return False
-    now = time.time()
-    # purge old
-    while dq and (now - dq[0]) > _FAILED_WINDOW_SECONDS:
-        dq.popleft()
-    return len(dq) >= _FAILED_THRESHOLD
+    init_db()
+    with get_db_connection() as conn:
+        row = conn.execute('SELECT attempts, window_start FROM admin_auth_failures WHERE ip = ?',
+                           (ip or 'unknown',)).fetchone()
+    return bool(row and time.time() - row['window_start'] < _FAILED_WINDOW_SECONDS
+                and row['attempts'] >= _FAILED_THRESHOLD)
 
 
 def _record_failed(ip: str) -> None:
-    if not ip:
-        return
-    dq = _FAILED_ADMIN.get(ip)
-    if not dq:
-        dq = deque()
-        _FAILED_ADMIN[ip] = dq
-    dq.append(time.time())
+    init_db()
+    now = time.time()
+    with get_db_connection() as conn:
+        conn.execute('BEGIN IMMEDIATE')
+        conn.execute('DELETE FROM admin_auth_failures WHERE window_start < ?',
+                     (now - _FAILED_WINDOW_SECONDS,))
+        conn.execute("""INSERT INTO admin_auth_failures (ip, attempts, window_start) VALUES (?, 1, ?)
+                        ON CONFLICT(ip) DO UPDATE SET attempts = attempts + 1""",
+                     (ip or 'unknown', now))
+
+
+def _validate_credentials(username: str | None, password: str | None) -> bool:
+    """Compare UTF-8 bytes so non-ASCII credentials cannot raise TypeError."""
+    user_ok = hmac.compare_digest(str(username or '').encode(), ADMIN_USERNAME.encode())
+    pass_ok = hmac.compare_digest(str(password or '').encode(), ADMIN_PASSWORD.encode())
+    return bool(ADMIN_PASSWORD) and user_ok and pass_ok
 
 
 def check_admin_auth():
-    """Check if request has valid admin authentication.
+    if not hasattr(g, '_admin_auth_result'):
+        g._admin_auth_result = _check_admin_auth()
+    return g._admin_auth_result
 
-    Accepts either a valid Basic auth header (username+password) or an
-    active 'admin_authenticated' session flag. Uses timing-safe compare for
-    credentials and enforces a per-IP rate limit on failures.
-    """
-    # Session-based short-circuit with expiry
+
+def _check_admin_auth():
+    if not ADMIN_PASSWORD:
+        return False
     if session.get('admin_authenticated'):
-        ts = session.get('admin_authenticated_at')
         try:
-            if ts and (time.time() - float(ts)) <= ADMIN_SESSION_TIMEOUT:
+            age = time.time() - float(session.get('admin_authenticated_at', 0))
+            if 0 <= age <= ADMIN_SESSION_TIMEOUT:
                 return True
-        except Exception:
+        except (TypeError, ValueError):
             pass
-        # expired or invalid timestamp => clear session flags
-        session.pop('admin_authenticated', None)
-        session.pop('admin_authenticated_at', None)
-        return False
-
-    ip = request.remote_addr or request.environ.get('REMOTE_ADDR')
-    # block quickly if IP has too many recent failures
-    if _is_ip_blocked(ip):
-        return False
-
+        session.clear()
     auth = request.authorization
-    if not auth:
+    if not auth or _is_ip_blocked(request.remote_addr):
         return False
+    if _validate_credentials(auth.username, auth.password):
+        return True
+    _record_failed(request.remote_addr)
+    return False
 
-    # timing-safe comparison
-    user_ok = hmac.compare_digest(str(auth.username or ''), str(ADMIN_USERNAME))
-    pass_ok = hmac.compare_digest(str(auth.password or ''), str(ADMIN_PASSWORD))
-    ok = user_ok and pass_ok
-    if not ok:
-        _record_failed(ip)
-    return ok
+
+def csrf_token():
+    if '_admin_csrf' not in session:
+        session['_admin_csrf'] = secrets.token_urlsafe(32)
+    return session['_admin_csrf']
+
+
+@app.context_processor
+def security_template_context():
+    return {'csrf_token': csrf_token, 'is_admin': check_admin_auth()}
+
+
+def _valid_csrf():
+    token = request.headers.get('X-CSRF-Token') or request.form.get('csrf_token', '')
+    expected = session.get('_admin_csrf', '')
+    return bool(token and expected and hmac.compare_digest(token.encode(), expected.encode()))
 
 
 def require_admin(f):
-    """Decorator to require admin authentication."""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         if not check_admin_auth():
-            # If the client appears to be a browser (accepts HTML) and no
-            # Basic Authorization header was provided, redirect to the form
-            # login so the user can re-authenticate after session expiry.
-            if not check_admin_auth():
-                # If session exists but expired, clear it and redirect browser clients
-                ts = session.get('admin_authenticated_at')
-                if ts:
-                    try:
-                        if (time.time() - float(ts)) > ADMIN_SESSION_TIMEOUT:
-                            # expired
-                            session.pop('admin_authenticated', None)
-                            session.pop('admin_authenticated_at', None)
-                            has_basic = bool(request.authorization)
-                            accepts_html = request.accept_mimetypes.accept_html
-                            if (not has_basic) and accepts_html:
-                                return redirect(url_for('admin_login_form', expired=1))
-                    except Exception:
-                        # on parse error, clear and continue to normal auth flow
-                        session.pop('admin_authenticated', None)
-                        session.pop('admin_authenticated_at', None)
-
-            if not check_admin_auth():
-                # If the client appears to be a browser (accepts HTML) and no
-                # Basic Authorization header was provided, redirect to the form
-                # login so the user can re-authenticate after session expiry.
-                has_basic = bool(request.authorization)
-                accepts_html = request.accept_mimetypes.accept_html
-                if (not has_basic) and accepts_html:
-                    # redirect to the GET login form
-                    return redirect(url_for('admin_login_form'))
-
-                # Otherwise, return a 401 challenge for API / Basic auth clients
-                return Response(
-                    'Admin authentication required.\n'
-                    'Please login with the admin credentials.',
-                    401,
-                    {'WWW-Authenticate': 'Basic realm="Admin Area"'}
-                )
+            if not request.authorization and request.accept_mimetypes.accept_html and request.method == 'GET':
+                return redirect(url_for('admin_login_form'))
+            return Response('Admin authentication required.', 401,
+                            {'WWW-Authenticate': 'Basic realm="Admin Area"'})
+        if request.method not in ('GET', 'HEAD', 'OPTIONS'):
+            # Explicit Basic headers without browser cookies/origin support CLI clients.
+            # Browser requests, including cached Basic auth, must pass the CSRF token.
+            cli_basic = (request.authorization and not session.get('admin_authenticated')
+                         and not request.headers.get('Origin')
+                         and not request.headers.get('Sec-Fetch-Site'))
+            if request.headers.get('Sec-Fetch-Site') == 'cross-site' or (not cli_basic and not _valid_csrf()):
+                return jsonify({'error': 'Invalid CSRF token.'}), 400
         return f(*args, **kwargs)
     return decorated
 
 
-def _validate_credentials(username: str | None, password: str | None) -> bool:
-    """Timing-safe validation of provided username/password."""
-    # Strip whitespace from input just in case of copy-paste errors
-    clean_user = str(username or '').strip()
-    clean_pass = str(password or '').strip()
-    
-    user_ok = hmac.compare_digest(clean_user, str(ADMIN_USERNAME))
-    pass_ok = hmac.compare_digest(clean_pass, str(ADMIN_PASSWORD))
-    return user_ok and pass_ok
+@app.after_request
+def security_headers(response):
+    response.headers['X-Content-Type-Options'] = 'nosniff'
+    response.headers['X-Frame-Options'] = 'DENY'
+    response.headers['Referrer-Policy'] = 'same-origin'
+    response.headers['Content-Security-Policy'] = "base-uri 'self'; object-src 'none'; frame-ancestors 'none'"
+    if request.path in ('/admin', '/admin/login'):
+        response.headers['Content-Security-Policy'] += "; script-src 'self'; connect-src 'self'; form-action 'self'"
+    if request.path.startswith(('/admin', '/debug', '/__', '/download', '/generate')) or session:
+        response.headers['Cache-Control'] = 'no-store'
+    return response
 
 
 @app.route('/admin/login', methods=['GET'])
@@ -244,11 +247,10 @@ def admin_login_form():
 
     The form POSTs to the same URL and includes username/password fields.
     """
-    token = secrets.token_urlsafe(24)
-    session['_admin_csrf'] = token
+    token = csrf_token()
     # allow passing expired=1 as query param when redirected after session expiry
     expired = bool(request.args.get('expired'))
-    return render_template('admin_login.html', csrf_token=token, expired=expired), 200
+    return render_template('admin_login.html', login_csrf_token=token, expired=expired), 200
 
 
 @app.route('/admin/login', methods=['POST'])
@@ -263,7 +265,7 @@ def admin_login():
         return Response('Too many failed attempts; try later.', status=403)
 
     token = request.form.get('csrf_token') or request.headers.get('X-CSRF-Token')
-    if not token or token != session.get('_admin_csrf'):
+    if not _valid_csrf():
         # record attempt but keep generic message
         _record_failed(ip)
         return Response('Invalid CSRF token or session.', status=400)
@@ -274,11 +276,11 @@ def admin_login():
         _record_failed(ip)
         return Response('Invalid credentials.', status=401)
 
-    # success
+    # Rotate session data and CSRF token after authentication.
+    session.clear()
+    csrf_token()
     session['admin_authenticated'] = True
     session['admin_authenticated_at'] = time.time()
-    # clear csrf token
-    session.pop('_admin_csrf', None)
     # If this was a browser form POST, redirect to the admin dashboard.
     # If the POST had form data (normal browser form submit), redirect to dashboard.
     if request.form:
@@ -294,9 +296,9 @@ def admin_login():
 
 
 @app.route('/admin/logout', methods=['POST'])
+@require_admin
 def admin_logout():
-    session.pop('admin_authenticated', None)
-    session.pop('admin_authenticated_at', None)
+    session.clear()
     return jsonify({'ok': True, 'message': 'Logged out'})
 
 
@@ -313,10 +315,9 @@ def admin_index():
     # UI is only shown after a successful form login.
     if not check_admin_auth():
         # Generate CSRF token and show login page (allow expired query forwarded)
-        token = secrets.token_urlsafe(24)
-        session['_admin_csrf'] = token
+        token = csrf_token()
         expired = bool(request.args.get('expired'))
-        return render_template('admin_login.html', csrf_token=token, expired=expired), 200
+        return render_template('admin_login.html', login_csrf_token=token, expired=expired), 200
 
     # Authenticated path continues below
     # session remaining (for compatibility; the old UI does not rely on it but keep it)
@@ -388,7 +389,9 @@ def admin_index():
         pass
 
     # Prefer the React-based admin UI which mounts inside `admin_react.html`.
-    return render_template('admin_react.html',
+    manifest = _read_json_cached(str(pathlib.Path(__file__).parent / 'frontend/dist/.vite/manifest.json')) or {}
+    admin_entry = manifest.get('src/admin-shell.js', {}).get('file')
+    return render_template('admin_react.html', admin_asset='/' + admin_entry if admin_entry else None,
                            events_count=events_count,
                            last_import=datetime.fromtimestamp(last_import) if last_import else None,
                            extractor_running=extractor_running,
@@ -447,6 +450,7 @@ def health_check():
 
 
 @app.route("/debug/pipeline", methods=["GET"])
+@require_admin
 def debug_pipeline():
     """Diagnostic: show what the events pipeline sees (no auth required, read-only)."""
     out_dir = pathlib.Path('playwright_captures')
@@ -530,6 +534,7 @@ def debug_pipeline():
 
 
 @app.route('/log_js_error', methods=['POST'])
+@require_admin
 def log_js_error():
     """Receive JS error reports from the frontend for debugging.
 
@@ -537,20 +542,14 @@ def log_js_error():
     to capture client-side exceptions. It logs the JSON payload at ERROR
     level and returns 204 No Content.
     """
-    try:
-        payload = request.get_json(silent=True)
-    except Exception:
-        payload = None
-    if payload is None:
-        # If JSON parsing failed (common when navigator.sendBeacon was used
-        # without an application/json content-type), log the raw body as text
-        try:
-            raw = request.get_data(as_text=True)
-        except Exception:
-            raw = None
-        app.logger.error('JS CLIENT ERROR: payload_json=NULL, raw_body=%s', raw)
-    else:
-        app.logger.error('JS CLIENT ERROR: %s', json.dumps(payload, ensure_ascii=False))
+    if not app.debug:
+        return '', 404
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return '', 400
+    app.logger.error('JS CLIENT ERROR: %s', json.dumps({
+        key: str(payload.get(key, ''))[:2000] for key in ('message', 'filename', 'lineno', 'error')
+    }, ensure_ascii=True))
     return ('', 204)
 
 
@@ -714,113 +713,25 @@ def parse_ics_direct(text: str) -> List[Event]:
     return evs
 
 
-def render_and_find_ics(url: str) -> List[str]:
-    """Use Playwright to render a page and return candidate .ics URLs.
-
-    Returns a list of candidate URLs (may be empty)."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except Exception:
-        raise RuntimeError("playwright is not installed. Install with: pip install playwright && playwright install")
-
-    candidates = []
-    with sync_playwright() as p:
-        # If a persistent user data dir is supplied, reuse it so the context can be authenticated.
-        user_data_dir = os.environ.get("PLAYWRIGHT_USER_DATA_DIR")
-        if user_data_dir:
-            # launch_persistent_context returns a BrowserContext
-            context = p.chromium.launch_persistent_context(user_data_dir, headless=True)
-            page = context.new_page()
-            browser = None
-        else:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-        # capture network responses that might be calendar data
-        responses = []
-        saved_files = []
-
-        def safe_name(s: str) -> str:
-            import hashlib, urllib.parse
-
-            h = hashlib.sha1(s.encode("utf-8")).hexdigest()[:12]
-            u = urllib.parse.quote_plus(s)[:60]
-            return f"last_response_{h}_{u}.txt"
-
-        def on_response(resp):
-            try:
-                ct = resp.headers.get("content-type", "")
-                url_ = resp.url
-                is_calendar = False
-                if "calendar" in ct or url_.lower().endswith(".ics") or ".ics?" in url_.lower() or "calendar" in url_.lower():
-                    is_calendar = True
-                if is_calendar:
-                    # try to read body and save it
-                    try:
-                        body = resp.text()
-                    except Exception:
-                        body = None
-                    if body:
-                        fname = safe_name(url_)
-                        with open(fname, "w", encoding="utf-8") as f:
-                            f.write(body)
-                        saved_files.append(fname)
-                        responses.append(url_)
-                else:
-                    # still record responses that look promising (XHR/json) which might contain feed URLs
-                    if resp.request.resource_type == "xhr":
-                        try:
-                            body = resp.text()
-                        except Exception:
-                            body = None
-                        if body and ("ics" in body.lower() or "calendar" in body.lower() or "subscribe" in body.lower()):
-                            fname = safe_name(url_)
-                            with open(fname, "w", encoding="utf-8") as f:
-                                f.write(body)
-                            saved_files.append(fname)
-                            responses.append(url_)
-            except Exception:
-                pass
-
-    page.on("response", on_response)
-    page.goto(url, wait_until="networkidle", timeout=30000)
-
-    # find links in DOM that look like .ics
-    anchors = page.query_selector_all("a[href]")
-    for a in anchors:
-        try:
-            href = a.get_attribute("href")
-            if href and (href.lower().endswith(".ics") or "webcal:" in href.lower() or ".ics?" in href.lower()):
-                # resolve relative hrefs
-                if href.startswith("/"):
-                    base = page.url
-                    resolved = base.rstrip("/") + href
-                else:
-                    resolved = href
-                candidates.append(resolved)
-        except Exception:
-            continue
-
-    # add any network responses
-    candidates.extend(responses)
-
-    # dedupe preserving order
-    seen = set()
-    out = []
-    for c in candidates:
-        if c not in seen:
-            seen.add(c)
-            out.append(c)
-    # close whichever we opened
-    try:
-        if browser:
-            browser.close()
-        else:
-            context.close()
-    except Exception:
-        pass
-
-    # return candidates and saved files
-    return out, saved_files
+def render_and_find_ics(url: str):
+    """Discover feed links while the browser context is still alive."""
+    from playwright.sync_api import sync_playwright
+    from tools.browser_context import calendar_browser
+    from urllib.parse import urljoin
+    validate_calendar_url(url)
+    with sync_playwright() as playwright, calendar_browser(playwright) as context:
+        page = context.new_page()
+        page.goto(url, wait_until='networkidle', timeout=30000)
+        candidates = []
+        for anchor in page.query_selector_all('a[href]'):
+            href = anchor.get_attribute('href') or ''
+            if '.ics' in href.lower():
+                candidate = urljoin(page.url, href)
+                try:
+                    candidates.append(validate_calendar_url(candidate))
+                except UnsafeCalendarURL:
+                    continue
+        return list(dict.fromkeys(candidates)), []
 
 
 # ── Schedule rebuild tracking ──
@@ -853,205 +764,84 @@ _FP_CACHE_TTL = 5  # seconds — re-scan at most every 5s
 
 
 def _events_files_fingerprint() -> tuple:
-    """Return (max_mtime, file_count) of events_*.json files.
-
-    Also incorporates the import_complete.txt mtime so that when the detached
-    extractor finishes (and writes that marker), we detect the change even
-    though all individual events_*.json files may already exist from an earlier
-    pass.
-
-    Results are cached for _FP_CACHE_TTL seconds to avoid opening hundreds of
-    file descriptors on every HTTP request (fixes [Errno 24]).
-    """
-    now = time.time()
+    """Fingerprint every authoritative input, not just the newest file's mtime."""
     with _fp_cache_lock:
-        if (now - _fp_cache['ts']) < _FP_CACHE_TTL:
+        now = time.monotonic()
+        if now - _fp_cache['ts'] < _FP_CACHE_TTL:
             return _fp_cache['result']
-
-    # Scan outside the lock to avoid blocking other threads
-    out_dir = pathlib.Path('playwright_captures')
-    max_mt = 0.0
-    count = 0
-    try:
-        for p in out_dir.glob('events_*.json'):
+        out_dir = pathlib.Path('playwright_captures')
+        event_files = [p for p in out_dir.glob('events_*.json') if not p.name.endswith('.tmp.json')]
+        inputs = event_files + [out_dir / name for name in
+                                ('events.json', 'calendar_map.json', 'import_complete.txt')]
+        inputs += [pathlib.Path('config') / 'room_aliases.json',
+                   pathlib.Path('config') / 'building_aliases.json']
+        digest = hashlib.sha256(date.today().isoformat().encode())
+        for path in sorted(inputs):
             try:
-                mt = p.stat().st_mtime
-                if mt > max_mt:
-                    max_mt = mt
-                count += 1
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # Include import_complete.txt mtime so a finished extraction forces rebuild
-    try:
-        ic = out_dir / 'import_complete.txt'
-        if ic.exists():
-            ic_mt = ic.stat().st_mtime
-            if ic_mt > max_mt:
-                max_mt = ic_mt
-    except Exception:
-        pass
-
-    result = (max_mt, count)
-    with _fp_cache_lock:
-        _fp_cache['result'] = result
-        _fp_cache['ts'] = time.time()
-    return result
+                stat = path.stat()
+                digest.update(f'{path}:{stat.st_mtime_ns}:{stat.st_size}:{stat.st_ino}'.encode())
+            except FileNotFoundError:
+                continue
+        result = (digest.hexdigest(), len(event_files))
+        _fp_cache.update(result=result, ts=now)
+        return result
 
 
 def ensure_schedule(from_date: date, to_date: date):
-    """Ensure `playwright_captures/schedule_by_room.json` and CSV exist for the given range.
+    """Publish at most one schedule build across workers; serve the last snapshot.
 
-    Uses fingerprinting of events_*.json files to avoid expensive rebuilds
-    when data hasn't changed.  Delegates ALL merging/loading to
-    tools/build_schedule_by_room.py so that app.py itself never opens hundreds
-    of event files (which caused [Errno 24] Too many open files under Gunicorn
-    with 8 workers).
-
-    A cross-process file lock prevents multiple Gunicorn workers from
-    rebuilding the schedule simultaneously.
-
-    IMPORTANT: when the build produces an empty schedule (rc=2), we save the
-    fingerprint with was_empty=True and record the wall-clock time. The fast
-    path will re-trigger a rebuild every _EMPTY_SCHEDULE_RETRY_SEC seconds
-    (default 30s) so that events produced by the detached extraction are
-    picked up promptly without hammering the subprocess on every HTTP request.
+    Build fingerprints are persisted so every Gunicorn worker can reuse a build
+    made by another worker. Lock failures never launch competing subprocesses.
     """
-    global _schedule_rebuilding, _schedule_last_empty_check
     out_dir = pathlib.Path('playwright_captures')
+    out_dir.mkdir(parents=True, exist_ok=True)
     jpath = out_dir / 'schedule_by_room.json'
     cpath = out_dir / 'schedule_by_room.csv'
-
-    # Build for a wider window so future semester events are included.
-    # Keep a small past buffer for today/previous day overlaps.
-    today = date.today()
-    _PAST_DAYS = 30
-    _FUTURE_DAYS = 240  # ~8 months ahead to cover full semester
-    build_from = today - timedelta(days=_PAST_DAYS)
-    build_to   = today + timedelta(days=_FUTURE_DAYS)
-
-    # ── Fast path: if the schedule file exists and data hasn't changed, skip rebuild ──
-    cur_mtime, cur_count = _events_files_fingerprint()
+    state_path = out_dir / 'schedule_build_state.json'
+    fingerprint, count = _events_files_fingerprint()
     now = time.time()
-    with _schedule_rebuild_lock:
-        prev = _schedule_last_rebuild
-        data_changed = (cur_mtime != prev['events_mtime'] or
-                        cur_count != prev['events_count'])
-        need_rebuild = data_changed or not jpath.exists()
-        if need_rebuild and _schedule_rebuilding and jpath.exists():
-            need_rebuild = False
-        # If data hasn't changed but the last build produced an empty schedule,
-        # retry periodically in case the build_schedule_by_room.py script finds
-        # events it previously missed (e.g. extraction finishing).
-        if not need_rebuild and prev.get('was_empty') and jpath.exists():
-            if (now - _schedule_last_empty_check) >= _EMPTY_SCHEDULE_RETRY_SEC:
-                need_rebuild = True
 
-    if not need_rebuild:
-        if jpath.exists():
+    def up_to_date(state):
+        return (state.get('events_mtime') == fingerprint
+                and state.get('events_count') == count and jpath.exists()
+                and (not state.get('was_empty') or now - state.get('checked_at', 0) < _EMPTY_SCHEDULE_RETRY_SEC))
+
+    with _schedule_rebuild_lock:
+        if up_to_date(_schedule_last_rebuild):
             return jpath, cpath
-        # Fall through to rebuild
-
-    # ── Slow path: rebuild via subprocess ──
-    # Use a file-based lock so only one Gunicorn worker rebuilds at a time
-    import fcntl
-    lock_path = out_dir / '.schedule_rebuild.lock'
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    try:
-        lock_fd = open(lock_path, 'w')
-    except Exception:
-        lock_fd = None
-
-    got_lock = False
-    if lock_fd:
+    with file_lock(out_dir / '.schedule_rebuild.lock', blocking=False) as acquired:
+        if not acquired:
+            # Existing snapshot is safe during rebuild; no competing fallback.
+            return jpath, cpath
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            got_lock = True
-        except (OSError, IOError):
-            # Another process is rebuilding — return existing file or wait briefly
-            lock_fd.close()
-            lock_fd = None
-            if jpath.exists():
-                return jpath, cpath
-            # No file and can't lock → wait a short time for the other rebuild
-            time.sleep(2)
-            if jpath.exists():
-                return jpath, cpath
-            # Still nothing — fall through and try to build (may contend, but better than empty)
-
-    with _schedule_rebuild_lock:
-        _schedule_rebuilding = True
-
-    try:
-        # Let build_schedule_by_room.py handle everything: it reads events_*.json
-        # files directly, so we don't need to open them here.
-        script = pathlib.Path('tools') / 'build_schedule_by_room.py'
-        if not script.exists():
-            raise FileNotFoundError(script)
-        cmd = [sys.executable, str(script),
-               '--from', build_from.isoformat(),
-               '--to', build_to.isoformat()]
-        result = subprocess.run(cmd, check=False, capture_output=True, text=True,
-                                timeout=120)
-
-        if result.returncode == 0:
-            # Successful build with events — update fingerprint so subsequent
-            # requests skip the rebuild.
-            app.logger.info('ensure_schedule: rebuilt schedule (events_count=%d)', cur_count)
+            with state_path.open(encoding='utf-8') as handle:
+                state = json.load(handle)
+        except (ValueError, OSError):
+            state = {}
+        if up_to_date(state):
             with _schedule_rebuild_lock:
-                _schedule_last_rebuild['events_mtime'] = cur_mtime
-                _schedule_last_rebuild['events_count'] = cur_count
-                _schedule_last_rebuild['was_empty'] = False
-                _schedule_rebuilding = False
-        elif result.returncode == 2:
-            # No events found — save fingerprint so we don't rebuild on every
-            # request, but mark was_empty=True so the throttled retry loop
-            # re-checks every _EMPTY_SCHEDULE_RETRY_SEC seconds.
-            app.logger.info('ensure_schedule: no events found yet (rc=2, events_count=%d)', cur_count)
-            with _schedule_rebuild_lock:
-                _schedule_last_rebuild['events_mtime'] = cur_mtime
-                _schedule_last_rebuild['events_count'] = cur_count
-                _schedule_last_rebuild['was_empty'] = True
-                _schedule_rebuilding = False
-                _schedule_last_empty_check = time.time()
-        else:
-            app.logger.error('build_schedule_by_room.py failed (rc=%d): %s',
-                             result.returncode, (result.stderr or '')[:500])
-            with _schedule_rebuild_lock:
-                _schedule_rebuilding = False
-
-        # Invalidate file cache
-        with _file_cache_lock:
-            _file_cache.pop(str(jpath), None)
-
-    except Exception as e:
-        app.logger.error('ensure_schedule error: %s', e)
+                _schedule_last_rebuild.update(state)
+            return jpath, cpath
+        today = date.today()
+        build_from = today - timedelta(days=int(os.environ.get('EXTRACT_PAST_DAYS', '30')))
+        build_to = today + timedelta(days=int(os.environ.get('EXTRACT_FUTURE_DAYS', '240')))
+        result = subprocess.run(
+            [sys.executable, 'tools/build_schedule_by_room.py', '--from', build_from.isoformat(), '--to', build_to.isoformat()],
+            check=False, capture_output=True, text=True, timeout=120,
+        )
+        if result.returncode not in (0, 2):
+            app.logger.error('Schedule builder failed (rc=%d)', result.returncode)
+            return jpath, cpath
+        if not jpath.exists():
+            atomic_write_json(jpath, {})
+        state = {'events_mtime': fingerprint, 'events_count': count,
+                 'was_empty': result.returncode == 2, 'checked_at': now}
+        atomic_write_json(state_path, state)
         with _schedule_rebuild_lock:
-            _schedule_rebuilding = False
-        raise
-    finally:
-        # Always close the lock file descriptor to prevent FD leaks.
-        # fcntl locks are released automatically when the fd is closed.
-        if lock_fd:
-            try:
-                lock_fd.close()
-            except Exception:
-                pass
-
-    if not jpath.exists():
-        # build_schedule_by_room.py returns 2 and doesn't write the file when
-        # there are no events. Create a minimal empty schedule so the endpoint
-        # returns [] instead of 500.  The was_empty flag in the fingerprint
-        # ensures periodic retries until real events arrive.
-        try:
-            with open(jpath, 'w', encoding='utf-8') as f:
-                json.dump({}, f)
-        except Exception:
-            pass
-
-    return jpath, cpath
+            _schedule_last_rebuild.update(state)
+        with _file_cache_lock:
+            _file_cache.pop(str(jpath.resolve()), None)
+        return jpath, cpath
 
 
 # Background extractor state
@@ -1123,49 +913,14 @@ _periodic_lock = threading.Lock()
 DB_PATH = pathlib.Path('data') / 'app.db'
 DB_PATH.parent.mkdir(exist_ok=True)
 
-# Track sqlite3 connections created during runtime so we can close any that
-# accidentally remain open (helps silence ResourceWarning during tests and
-# ensures cleaner shutdown). We still prefer callers to use `with
-# get_db_connection() as conn:` so connections are closed promptly.
-# NOTE: We use a bounded deque instead of an unbounded list to prevent the
-# tracker from accumulating thousands of (already-closed) connection objects
-# over the lifetime of a long-running Gunicorn worker.
-import atexit
-_OPEN_SQLITE_CONNS = deque(maxlen=64)
-_ORIG_SQLITE_CONNECT = sqlite3.connect
-
-def _tracking_sqlite_connect(*args, **kwargs):
-    conn = _ORIG_SQLITE_CONNECT(*args, **kwargs)
-    try:
-        _OPEN_SQLITE_CONNS.append(conn)
-    except Exception:
-        pass
-    return conn
-
-# Monkey-patch sqlite3.connect to track connections created via plain calls.
-sqlite3.connect = _tracking_sqlite_connect
-
-def _close_tracked_connections():
-    for c in list(_OPEN_SQLITE_CONNS):
-        try:
-            c.close()
-        except Exception:
-            pass
-    _OPEN_SQLITE_CONNS.clear()
-
-atexit.register(_close_tracked_connections)
-
 def get_db_connection():
-    conn = sqlite3.connect(str(DB_PATH), timeout=30)
+    conn = sqlite3.connect(str(DB_PATH), timeout=10)
     conn.row_factory = sqlite3.Row
-    # ── Performance: WAL mode + tuning for concurrent reads ──
-    if os.environ.get('SQLITE_WAL_MODE', ''):
-        conn.execute('PRAGMA journal_mode=WAL')
+    # Keep the per-connection cache modest (threads/workers multiply this cost).
+    conn.execute('PRAGMA cache_size=-4000')
+    conn.execute('PRAGMA busy_timeout=10000')
+    if os.environ.get('SQLITE_WAL_MODE', '1') == '1':
         conn.execute('PRAGMA synchronous=NORMAL')
-        conn.execute('PRAGMA cache_size=-64000')   # 64 MB page cache
-        conn.execute('PRAGMA mmap_size=268435456')  # 256 MB memory-mapped I/O
-        conn.execute('PRAGMA temp_store=MEMORY')
-        conn.execute('PRAGMA busy_timeout=10000')   # 10s busy timeout
     return _AutoClosingConnection(conn)
 
 
@@ -1202,131 +957,44 @@ class _AutoClosingConnection:
                 pass
         return False
 
+_db_init_lock = threading.Lock()
+_db_initialized = None
+
+
 def init_db():
-    """Create tables if they do not exist."""
-    with get_db_connection() as conn:
-        cur = conn.cursor()
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS calendars (
-                id INTEGER PRIMARY KEY,
-                url TEXT UNIQUE,
-                name TEXT,
-                color TEXT,
-                enabled INTEGER DEFAULT 1,
-                created_at TEXT,
-                last_fetched TEXT
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS extracurricular_events (
-                id INTEGER PRIMARY KEY,
-                title TEXT,
-                organizer TEXT,
-                date TEXT,
-                time TEXT,
-                location TEXT,
-                category TEXT,
-                description TEXT,
-                created_at TEXT
-            )
-        ''')
-        cur.execute('''
-            CREATE TABLE IF NOT EXISTS manual_events (
-                id INTEGER PRIMARY KEY,
-                start TEXT,
-                end TEXT,
-                title TEXT,
-                location TEXT,
-                raw TEXT,
-                created_at TEXT
-            )
-        ''')
-        conn.commit()
-    # ensure older DBs have the color column
-    try:
+    global _db_initialized
+    path = pathlib.Path(DB_PATH).resolve()
+    with _db_init_lock:
+        stat = path.stat() if path.exists() else None
+        identity = (str(path), stat.st_dev, stat.st_ino) if stat else None
+        if identity is not None and identity == _db_initialized:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
         with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT color FROM calendars LIMIT 1")
-            _ = cur.fetchone()
-    except Exception:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('ALTER TABLE calendars ADD COLUMN color TEXT')
-                conn.commit()
-        except Exception:
-            pass
-    # ensure older DBs have the upn column (optional user principal name)
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT upn FROM calendars LIMIT 1")
-            _ = cur.fetchone()
-    except Exception:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('ALTER TABLE calendars ADD COLUMN upn TEXT')
-                conn.commit()
-        except Exception:
-            pass
-    # ensure older DBs have the building column
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT building FROM calendars LIMIT 1")
-            _ = cur.fetchone()
-    except Exception:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('ALTER TABLE calendars ADD COLUMN building TEXT')
-                conn.commit()
-        except Exception:
-            pass
-    # ensure older DBs have the room column
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT room FROM calendars LIMIT 1")
-            _ = cur.fetchone()
-    except Exception:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('ALTER TABLE calendars ADD COLUMN room TEXT')
-                conn.commit()
-        except Exception:
-            pass
-    # ensure older DBs have the email_address column
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT email_address FROM calendars LIMIT 1")
-            _ = cur.fetchone()
-    except Exception:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('ALTER TABLE calendars ADD COLUMN email_address TEXT')
-                conn.commit()
-        except Exception:
-            pass
-    # ensure older DBs have the html_url column (published HTML calendar URL
-    # used as a Playwright fallback when the primary ICS URL fails)
-    try:
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT html_url FROM calendars LIMIT 1")
-            _ = cur.fetchone()
-    except Exception:
-        try:
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                cur.execute('ALTER TABLE calendars ADD COLUMN html_url TEXT')
-                conn.commit()
-        except Exception:
-            pass
+            if os.environ.get('SQLITE_WAL_MODE', '1') == '1':
+                conn.execute('PRAGMA journal_mode=WAL')
+            conn.execute('BEGIN IMMEDIATE')
+            conn.execute("""CREATE TABLE IF NOT EXISTS calendars (
+                id INTEGER PRIMARY KEY, url TEXT UNIQUE, name TEXT, color TEXT,
+                enabled INTEGER DEFAULT 1, created_at TEXT, last_fetched TEXT,
+                upn TEXT, building TEXT, room TEXT, email_address TEXT, html_url TEXT)""")
+            columns = {row['name'] for row in conn.execute('PRAGMA table_info(calendars)')}
+            for column in ('color', 'upn', 'building', 'room', 'email_address', 'html_url'):
+                if column not in columns:
+                    conn.execute(f'ALTER TABLE calendars ADD COLUMN {column} TEXT')
+            conn.execute("""CREATE TABLE IF NOT EXISTS extracurricular_events (
+                id INTEGER PRIMARY KEY, title TEXT, organizer TEXT, date TEXT,
+                time TEXT, location TEXT, category TEXT, description TEXT, created_at TEXT)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS manual_events (
+                id INTEGER PRIMARY KEY, start TEXT, end TEXT, title TEXT,
+                location TEXT, raw TEXT, created_at TEXT)""")
+            conn.execute("""CREATE TABLE IF NOT EXISTS admin_auth_failures (
+                ip TEXT PRIMARY KEY, attempts INTEGER NOT NULL, window_start REAL NOT NULL)""")
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_manual_start ON manual_events(start)')
+            conn.execute('CREATE INDEX IF NOT EXISTS idx_extra_date ON extracurricular_events(date, time)')
+        stat = path.stat()
+        _db_initialized = (str(path), stat.st_dev, stat.st_ino)
+
 
 def migrate_from_files():
     """Migrate existing JSON configs into the DB if present."""
@@ -1410,6 +1078,13 @@ def update_calendar_metadata(url: str, name: str = None, color: str = None):
     except Exception:
         pass
 
+def _disabled_sources():
+    init_db()
+    with get_db_connection() as conn:
+        urls = conn.execute('SELECT url FROM calendars WHERE enabled = 0').fetchall()
+    return {hashlib.sha1(row['url'].encode()).hexdigest()[:8] for row in urls if row['url']}
+
+
 def list_calendar_urls():
     with get_db_connection() as conn:
         cur = conn.cursor()
@@ -1425,18 +1100,6 @@ def add_extracurricular_db(ev: dict):
                     (ev.get('title'), ev.get('organizer'), ev.get('date'), ev.get('time'), ev.get('location'), ev.get('category'), ev.get('description'), ev.get('created_at')))
         conn.commit()
         return cur.lastrowid
-
-    def delete_calendar_db(cal_id: int):
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute('DELETE FROM calendars WHERE id = ?', (cal_id,))
-            conn.commit()
-
-    def delete_manual_db(man_id: int):
-        with get_db_connection() as conn:
-            cur = conn.cursor()
-            cur.execute('DELETE FROM manual_events WHERE id = ?', (man_id,))
-            conn.commit()
 
 def add_manual_event_db(ev: dict):
     with get_db_connection() as conn:
@@ -1535,216 +1198,71 @@ def _run_extractors_parallel(entries) -> int:
     return succeeded
 
 
+def _launch_full_extraction():
+    """Detach imports from request lifetime and reap children while this worker lives."""
+    base = pathlib.Path(__file__).parent.resolve()
+    out_dir = base / 'playwright_captures'
+    out_dir.mkdir(exist_ok=True)
+    with (out_dir / 'extract_stdout.txt').open('a', encoding='utf-8') as stdout, (out_dir / 'extract_stderr.txt').open('a', encoding='utf-8') as stderr:
+        process = subprocess.Popen([sys.executable, str(base / 'tools/run_full_extraction.py')],
+                                   cwd=base, stdout=stdout, stderr=stderr,
+                                   start_new_session=True, close_fds=True)
+    extractor_state.update(running=True, detached_pid=process.pid,
+                           last_started=datetime.utcnow().isoformat())
+    pidfile = out_dir / 'extract_detached.pid'
+    pidfile.write_text(str(process.pid), encoding='utf-8')
+    def reap():
+        result = process.wait()
+        if extractor_state.get('detached_pid') == process.pid:
+            extractor_state.update(running=False, last_rc=result)
+        try:
+            if pidfile.read_text(encoding='utf-8').strip() == str(process.pid):
+                pidfile.unlink(missing_ok=True)
+        except FileNotFoundError:
+            pass
+    threading.Thread(target=reap, daemon=True).start()
+
+
 def _run_extractor_background():
-    """Internal: run the extractor script and update extractor_state."""
+    """Use the canonical process-safe import pipeline for every full refresh."""
+    if not _periodic_lock.acquire(blocking=False):
+        return
     out_dir = pathlib.Path('playwright_captures')
     out_dir.mkdir(exist_ok=True)
-    stdout_path = out_dir / 'extract_stdout.txt'
-    stderr_path = out_dir / 'extract_stderr.txt'
-    extractor_state['running'] = True
-    extractor_state['last_started'] = datetime.utcnow().isoformat()
-    extractor_state['stdout_path'] = str(stdout_path)
-    extractor_state['stderr_path'] = str(stderr_path)
-    # Acquire the periodic fetch lock so we don't overlap with the hourly
-    # periodic_fetcher or the daily prefetch. This serializes all extractor
-    # activity around the same lock so admin-triggered runs reflect CSV order
-    # without interleaving from the periodic background job.
+    extractor_state.update(running=True, last_started=datetime.utcnow().isoformat(),
+                           progress_message='Import running')
     try:
-        extractor_state['progress_message'] = 'Waiting to acquire periodic fetch lock...'
-        _periodic_lock.acquire()
-        extractor_state['progress_message'] = 'Acquired periodic fetch lock; starting import.'
+        with (out_dir / 'extract_stdout.txt').open('a', encoding='utf-8') as stdout, (out_dir / 'extract_stderr.txt').open('a', encoding='utf-8') as stderr:
+            result = subprocess.run([sys.executable, 'tools/run_full_extraction.py'],
+                                    stdout=stdout, stderr=stderr, timeout=7200)
+        extractor_state['last_rc'] = result.returncode
     except Exception:
-        # If lock acquire fails unexpectedly, continue but note it in state
-        extractor_state['progress_message'] = 'Failed to acquire periodic fetch lock; continuing.'
-    # Prefer to run extractor for each URL listed in the Rooms_PUBLISHER CSV
-    # if present. This ensures we only fetch events from the authoritative
-    # publisher list. Fall back to invoking the extractor script with no
-    # args (legacy behaviour) if CSV isn't available.
-    def _read_rooms_publisher():
-        # Try several likely locations for the publisher CSV (config/, project root)
-        csv_filename = 'Rooms_PUBLISHER_HTML-ICS(in).csv'
-        candidates = [pathlib.Path(__file__).parent / 'config' / csv_filename,
-                      pathlib.Path(__file__).parent / csv_filename,
-                      pathlib.Path(csv_filename)]
-        for p in candidates:
-            try:
-                if p.exists():
-                    return p
-            except Exception:
-                continue
-        return None
-
-    urls = read_rooms_publisher_csv()
-    if urls:
-        any_rc = False
-        # Use CSV-provided list only. The CSV is the authoritative source and
-        # we should not implicitly append DB-only calendars during a full
-        # import — this ensures the periodic or admin-triggered run only
-        # fetches the publisher-provided set (the 304 items you expect).
-        combined = list(urls)
-
-        # Record planned order for debugging/traceability (full list; UI truncates)
-        planned = [n for (_u, n, *_rest) in combined]
-        extractor_state['planned_order_full'] = planned
-        extractor_state['planned_order'] = planned[:200]
-
-        # write a small preamble to stdout so the admin log shows the planned order
-        try:
-            with open(stdout_path, 'a', encoding='utf-8') as out_f:
-                out_f.write('\nPlanned CSV extraction order (CSV only):\n')
-                for i, nm in enumerate(planned, start=1):
-                    out_f.write(f"{i}: {nm}\n")
-                out_f.write('\n')
-        except Exception:
-            pass
-
-        # Prune per-calendar files to match the CSV list: remove any
-        # events_<hash>.json and related extractor stdout/stderr files that
-        # do not correspond to URLs currently in the CSV. This keeps the
-        # `playwright_captures` directory limited to the 304 canonical
-        # calendars.
-        try:
-            wanted_hashes = set()
-            for u, _n, *_rest in combined:
-                try:
-                    h = hashlib.sha1(u.encode('utf-8')).hexdigest()[:8]
-                    wanted_hashes.add(h)
-                except Exception:
-                    continue
-
-            cap_dir = pathlib.Path('playwright_captures')
-            if cap_dir.exists():
-                # remove events files not in wanted_hashes
-                for p in cap_dir.glob('events_*.json'):
-                    fn = p.name
-                    try:
-                        h = fn.split('_', 1)[1].split('.', 1)[0]
-                    except Exception:
-                        h = None
-                    if h and h not in wanted_hashes:
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
-                # remove extractor per-url stdout/stderr pairs for removed hashes
-                for p in cap_dir.glob('extract_*.stdout.txt'):
-                    fn = p.name
-                    try:
-                        h = fn.split('_', 1)[1].split('.', 1)[0]
-                    except Exception:
-                        h = None
-                    if h and h not in wanted_hashes:
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
-                for p in cap_dir.glob('extract_*.stderr.txt'):
-                    fn = p.name
-                    try:
-                        h = fn.split('_', 1)[1].split('.', 1)[0]
-                    except Exception:
-                        h = None
-                    if h and h not in wanted_hashes:
-                        try:
-                            p.unlink()
-                        except Exception:
-                            pass
-                # prune calendar_map.json keys not in wanted_hashes
-                try:
-                    map_path = cap_dir / 'calendar_map.json'
-                    if map_path.exists():
-                        with open(map_path, 'r', encoding='utf-8') as mf:
-                            cmap = json.load(mf)
-                        changed = False
-                        for key in list(cmap.keys()):
-                            if key not in wanted_hashes:
-                                cmap.pop(key, None)
-                                changed = True
-                        if changed:
-                            with open(map_path, 'w', encoding='utf-8') as mf:
-                                json.dump(cmap, mf, indent=2, ensure_ascii=False)
-                except Exception:
-                    pass
-
-        except Exception:
-            pass
-
-        # Bounded parallel fetch — one slow/failed calendar no longer blocks
-        # the rest (the old sequential loop with no HTTP timeout could hang
-        # the whole import behind a single dead connection).
-        any_rc = _run_extractors_parallel(combined) > 0
-
-        # After running per-calendar extraction, regenerate the merged schedule
-        try:
-            today = date.today()
-            from_d = today - timedelta(days=60)  # -2 months ~ 60 days
-            to_d = today + timedelta(days=60)    # +2 months
-            extractor_state['progress_message'] = f'Regenerating merged schedule for {from_d}..{to_d}'
-            try:
-                ensure_schedule(from_d, to_d)
-                extractor_state['progress_message'] = f'Schedule regenerated for {from_d}..{to_d}'
-            except Exception as e:
-                ts = datetime.utcnow().isoformat()
-                ll = extractor_state.setdefault('log', [])
-                ll.append(f"{ts} - SCHEDULE GENERATION FAILED: {e}")
-        except Exception:
-            pass
-
-        extractor_state['last_rc'] = 0 if any_rc else 1
-        extractor_state['running'] = False
-        extractor_state['progress_message'] = 'Extraction finished.'
-        # Write disk markers so the admin UI (and detached extraction monitor)
-        # can detect completion even after process restart.
-        try:
-            cap_dir = pathlib.Path('playwright_captures')
-            cap_dir.mkdir(exist_ok=True)
-            # import_complete.txt
-            with open(cap_dir / 'import_complete.txt', 'w', encoding='utf-8') as f:
-                f.write(datetime.utcnow().isoformat() + '\n')
-            # import_progress.json with final totals
-            total = len(combined)
-            succeeded = sum(1 for entry in combined if (pathlib.Path('playwright_captures') / f'events_{hashlib.sha1(entry[0].encode("utf-8")).hexdigest()[:8]}.json').exists())
-            import json as _json
-            with open(cap_dir / 'import_progress.json', 'w', encoding='utf-8') as f:
-                _json.dump({
-                    'total_calendars': total,
-                    'succeeded': succeeded,
-                    'failed': total - succeeded,
-                    'finished': True,
-                    'finished_at': datetime.utcnow().isoformat(),
-                }, f, indent=2)
-        except Exception:
-            pass
-        try:
-            _periodic_lock.release()
-        except Exception:
-            pass
-        return
-
-    # Legacy fallback behaviour: invoke extractor script with no args
-    script = pathlib.Path('tools') / 'extract_published_events.py'
-    cmd = [sys.executable, str(script)]
-    try:
-        # ensure child python runs use UTF-8 on Windows (avoid cp1252 issues)
-        env = os.environ.copy()
-        env.setdefault('PYTHONUTF8', '1')
-        env.setdefault('PYTHONIOENCODING', 'utf-8')
-        with open(stdout_path, 'w', encoding='utf-8') as out_f, open(stderr_path, 'w', encoding='utf-8') as err_f:
-            proc = subprocess.run(cmd, stdout=out_f, stderr=err_f, text=True, env=env)
-            extractor_state['last_rc'] = proc.returncode
-    except Exception as e:
-        with open(stderr_path, 'a', encoding='utf-8') as err_f:
-            err_f.write(str(e))
+        app.logger.exception('Full calendar import failed')
         extractor_state['last_rc'] = 1
     finally:
         extractor_state['running'] = False
-        try:
-            _periodic_lock.release()
-        except Exception:
-            pass
+        extractor_state['progress_message'] = 'Import finished' if extractor_state.get('last_rc') == 0 else 'Import failed; previous snapshots retained'
+        _periodic_lock.release()
+
+
+def _run_single_calendar_import(url, calendar_name=None):
+    extractor_state['running'] = True
+    try:
+        extractor_state['last_rc'] = _run_extractor_for_url(url, calendar_name)
+    finally:
+        extractor_state['running'] = False
 
 
 def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = None) -> int:
+    validate_calendar_url(url)
+    if html_url:
+        validate_calendar_url(html_url)
+    h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
+    with file_lock(pathlib.Path('playwright_captures') / f'.calendar_{h}.lock'):
+        return _extract_calendar_url(url, calendar_name, html_url)
+
+
+def _extract_calendar_url(url: str, calendar_name: str = None, html_url: str = None) -> int:
     """Run the extractor script for a specific URL (uses CLI arg). Returns returncode.
 
     Parameters:
@@ -1758,7 +1276,7 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
     h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
     stdout_path = out_dir / f'extract_{h}.stdout.txt'
     stderr_path = out_dir / f'extract_{h}.stderr.txt'
-    
+
     # Update progress state and server-side log (so fast transitions are visible)
     extractor_state['current_calendar'] = _display_name_for(url, calendar_name)[:50]
     extractor_state['progress_message'] = f"Extracting events from {_display_name_for(url, calendar_name)}..."
@@ -1775,7 +1293,7 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
             del ll[0:len(ll)-LOG_CAP]
     except Exception:
         pass
-    
+
     # If the URL looks like a direct .ics feed, prefer fetching + parsing it directly
     try:
         url_l = (url or '').lower()
@@ -1830,8 +1348,7 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
                 out_dir = pathlib.Path('playwright_captures')
                 out_dir.mkdir(exist_ok=True)
                 ev_out = out_dir / f'events_{h}.json'
-                with open(ev_out, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+                atomic_write_json(ev_out, data)
                 # update calendar_map.json with full metadata (incl. room)
                 try:
                     map_path = out_dir / 'calendar_map.json'
@@ -1855,9 +1372,7 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
                                 break
                     except Exception:
                         pass
-                    cmap[h] = {'url': url, 'name': name or '', 'color': color, 'building': building, 'room': room}
-                    with open(map_path, 'w', encoding='utf-8') as mf:
-                        json.dump(cmap, mf, indent=2, ensure_ascii=False)
+                    update_json(map_path, lambda current: {**current, h: {'url': url, 'name': name or '', 'color': color, 'building': building, 'room': room}})
                 except Exception:
                     pass
 
@@ -1887,10 +1402,11 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
         # clobber the shared events.json.
         tmp_out = out_dir / f'_tmp_{h}'
         tmp_out.mkdir(parents=True, exist_ok=True)
+        (tmp_out / 'events.json').unlink(missing_ok=True)
         env['EXTRACT_OUTPUT_DIR'] = str(tmp_out)
         env.setdefault('PYTHONIOENCODING', 'utf-8')
         with open(stdout_path, 'w', encoding='utf-8') as out_f, open(stderr_path, 'w', encoding='utf-8') as err_f:
-            proc = subprocess.run(cmd, stdout=out_f, stderr=err_f, text=True, env=env)
+            proc = subprocess.run(cmd, stdout=out_f, stderr=err_f, text=True, env=env, timeout=300)
             rc = proc.returncode
         # collect child process stdout/stderr and push short diagnostic into server-side log
         try:
@@ -1927,13 +1443,15 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
         out_dir = pathlib.Path('playwright_captures')
         tmp_out = out_dir / f'_tmp_{h}'
         ev_in = tmp_out / 'events.json'
-        if ev_in.exists():
+        if rc == 0 and ev_in.exists():
             ev_out = out_dir / f'events_{h}.json'
             try:
                 with open(ev_in, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-            except Exception:
-                data = []
+            except (OSError, ValueError):
+                return 1
+            if not isinstance(data, list):
+                return 1
 
             # Update progress with event count
             extractor_state['events_extracted'] = len(data)
@@ -1962,8 +1480,7 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
 
             # write per-calendar events file
             try:
-                with open(ev_out, 'w', encoding='utf-8') as f:
-                    json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+                atomic_write_json(ev_out, data)
             except Exception:
                 pass
 
@@ -1991,9 +1508,7 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
                             break
                 except Exception:
                     pass
-                cmap[h] = {'url': url, 'name': name or '', 'color': color, 'building': building, 'room': room}
-                with open(map_path, 'w', encoding='utf-8') as f:
-                    json.dump(cmap, f, indent=2, ensure_ascii=False)
+                update_json(map_path, lambda current: {**current, h: {'url': url, 'name': name or '', 'color': color, 'building': building, 'room': room}})
             except Exception:
                 pass
 
@@ -2037,58 +1552,17 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
 
 
 def periodic_fetcher(interval_minutes: int = 60):
-    """Background loop that periodically fetches configured calendar URLs and runs extraction/parsing."""
-    global periodic_fetch_state
-    # read calendar URLs from DB
+    """One leader schedules the same importer used by admin/CLI refreshes."""
     while True:
-        _got_periodic_lock = False
+        periodic_fetch_state.update(running=True, last_run=datetime.utcnow().isoformat())
         try:
-
-            # Avoid overlapping runs
-            if not _periodic_lock.acquire(blocking=False):
-                # already running
-                # avoid busy-looping while another run holds the lock
-                time.sleep(5)
-                continue
-            _got_periodic_lock = True
-            periodic_fetch_state['running'] = True
-            periodic_fetch_state['last_run'] = datetime.utcnow().isoformat()
-
-            # Use the Rooms_PUBLISHER CSV as the single authoritative source of calendars.
-            # If the CSV is missing or empty, skip this run rather than falling back to the DB.
-            urls_with_names = read_rooms_publisher_csv()
-            if not urls_with_names:
-                # No CSV configured -> nothing to do this cycle
-                continue
-
-            # Bounded parallel fetch with allSettled semantics
-            any_success = _run_extractors_parallel(urls_with_names) > 0
-
-            if any_success:
+            _run_extractor_background()
+            if extractor_state.get('last_rc') == 0:
                 periodic_fetch_state['last_success'] = datetime.utcnow().isoformat()
-                # After successful per-calendar extraction, regenerate merged schedule
-                try:
-                    today = date.today()
-                    from_d = today - timedelta(days=60)
-                    to_d = today + timedelta(days=60)
-                    extractor_state['progress_message'] = f'Regenerating merged schedule for {from_d}..{to_d}'
-                    ensure_schedule(from_d, to_d)
-                    extractor_state['progress_message'] = f'Schedule regenerated for {from_d}..{to_d}'
-                except Exception as e:
-                    ts = datetime.utcnow().isoformat()
-                    ll = extractor_state.setdefault('log', [])
-                    ll.append(f"{ts} - PERIODIC SCHEDULE GENERATION FAILED: {e}")
-
         except Exception:
-            pass
+            app.logger.exception('Periodic import failed')
         finally:
             periodic_fetch_state['running'] = False
-            if _got_periodic_lock:
-                try:
-                    _periodic_lock.release()
-                except Exception:
-                    pass
-        # Sleep until next run
         time.sleep(interval_minutes * 60)
 
 
@@ -2130,24 +1604,26 @@ _BG_LOCK_PATH = pathlib.Path('playwright_captures') / '.bg_tasks.lock'
 # released as soon as the local variable in _init_background_tasks() went out
 # of scope, allowing a second worker to acquire the lock.
 _bg_lock_fd = None  # type: ignore
+_bg_next_attempt = 0.0
 
 
 def _init_background_tasks():
     """Start background threads once per process, but only in ONE worker.
-    
+
     Uses a file-based lock so that among 8 Gunicorn workers, only the first
     one to acquire the lock starts periodic_fetcher and daily_cleanup.
     Other workers skip background tasks entirely.
     """
-    global _background_tasks_initialized, _bg_lock_fd
+    global _background_tasks_initialized, _bg_lock_fd, _bg_next_attempt
     if _background_tasks_initialized:
         return
     with _background_tasks_init_lock:
-        if _background_tasks_initialized:
+        if _background_tasks_initialized or time.monotonic() < _bg_next_attempt:
             return
-        _background_tasks_initialized = True  # don't retry in this worker
+        _bg_next_attempt = time.monotonic() + 30
 
     if os.environ.get('DISABLE_BACKGROUND_TASKS') == '1':
+        _background_tasks_initialized = True
         return
 
     # Try to acquire a file-based lock (non-blocking).
@@ -2168,13 +1644,27 @@ def _init_background_tasks():
         _bg_lock_fd.write(str(os.getpid()))
         _bg_lock_fd.flush()
     except Exception:
-        # If locking fails for any reason, fall through and start tasks anyway
-        # (better to have duplicates than no background work at all)
-        pass
+        app.logger.exception('Cannot acquire background-task lock; skipping startup')
+        return
 
+    _background_tasks_initialized = True
     app.logger.info('This worker (pid=%d) owns background tasks', os.getpid())
     start_periodic_fetcher_if_needed(60)
     start_daily_cleanup_if_needed()
+
+
+@app.before_request
+def validate_admin_inputs():
+    if request.method == 'POST' and request.path in {
+        '/admin/set_calendar_url', '/admin/import_calendar',
+        '/admin/update_calendar', '/admin/update_calendar_color',
+    }:
+        if not check_admin_auth():
+            return None
+        for field in ('color', 'calendar_color'):
+            value = request.form.get(field)
+            if value and not re.fullmatch(r'#[0-9a-fA-F]{6}', value):
+                return jsonify({'error': 'Colors must use #RRGGBB.'}), 400
 
 
 @app.before_request
@@ -2288,8 +1778,7 @@ def cleanup_old_events(cutoff_days: int = 60, base_dir: str | pathlib.Path | Non
             # overwrite file if we removed anything
             if removed_from_file > 0:
                 evfile.parent.mkdir(parents=True, exist_ok=True)
-                with open(evfile, 'w', encoding='utf-8') as f:
-                    json.dump(kept, f, indent=2, ensure_ascii=False, default=str)
+                atomic_write_json(evfile, kept)
     except Exception:
         removed_from_file = 0
 
@@ -2298,7 +1787,6 @@ def cleanup_old_events(cutoff_days: int = 60, base_dir: str | pathlib.Path | Non
     # recent, but they may accumulate events outside the ±60 day window.
     calendar_events_pruned = 0
     calendar_files_removed = 0
-    future_cutoff = date.today() + timedelta(days=cutoff_days)
     try:
         captures_dir = base / 'playwright_captures'
         if captures_dir.exists() and captures_dir.is_dir():
@@ -2306,40 +1794,40 @@ def cleanup_old_events(cutoff_days: int = 60, base_dir: str | pathlib.Path | Non
                 # skip staging temp files
                 if p.name.endswith('.tmp.json'):
                     continue
-                try:
-                    with open(p, 'r', encoding='utf-8') as f:
-                        items = json.load(f)
-                    if not isinstance(items, list):
-                        continue
-                    kept = []
-                    for ev in items:
-                        s = ev.get('start')
-                        if not s:
-                            kept.append(ev)
+                with file_lock(captures_dir / f'.calendar_{p.stem.removeprefix("events_")}.lock'):
+                    try:
+                        with open(p, 'r', encoding='utf-8') as f:
+                            items = json.load(f)
+                        if not isinstance(items, list):
                             continue
-                        try:
-                            try:
-                                dt = datetime.fromisoformat(s)
-                            except Exception:
-                                from dateutil import parser as dtparser
-                                dt = dtparser.parse(s)
-                            d = dt.date()
-                            if d < cutoff_date or d > future_cutoff:
-                                calendar_events_pruned += 1
+                        kept = []
+                        for ev in items:
+                            s = ev.get('start')
+                            if not s:
+                                kept.append(ev)
                                 continue
-                            kept.append(ev)
-                        except Exception:
-                            kept.append(ev)
-                    if len(kept) < len(items):
-                        if kept:
-                            with open(p, 'w', encoding='utf-8') as f:
-                                json.dump(kept, f, indent=2, ensure_ascii=False, default=str)
-                        else:
-                            # no events left — remove the file entirely
-                            p.unlink()
-                            calendar_files_removed += 1
-                except Exception:
-                    continue
+                            try:
+                                try:
+                                    dt = datetime.fromisoformat(s)
+                                except Exception:
+                                    from dateutil import parser as dtparser
+                                    dt = dtparser.parse(s)
+                                d = dt.date()
+                                if d < cutoff_date:
+                                    calendar_events_pruned += 1
+                                    continue
+                                kept.append(ev)
+                            except Exception:
+                                kept.append(ev)
+                        if len(kept) < len(items):
+                            if kept:
+                                atomic_write_json(p, kept)
+                            else:
+                                # no events left — remove the file entirely
+                                p.unlink()
+                                calendar_files_removed += 1
+                    except Exception:
+                        continue
     except Exception:
         calendar_events_pruned = 0
 
@@ -2437,7 +1925,8 @@ def read_rooms_publisher_csv():
                     out.append((url, name, html_fallback))
     except Exception:
         return []
-    return out
+    disabled = _disabled_sources()
+    return [entry for entry in out if hashlib.sha1(entry[0].encode()).hexdigest()[:8] not in disabled]
 
 
 def read_rooms_publisher_csv_map():
@@ -2503,52 +1992,6 @@ def _daily_cleanup_loop(cutoff_days: int = 60):
         except Exception as e:
             print(f"Daily cleanup failed: {e}")
 
-        # After cleanup, proactively prefetch two months of events for all calendars.
-        # This helps ensure the server has an up-to-date two-month window available
-        # for API clients even if no browser client is active.
-        try:
-            from_date = date.today() - timedelta(days=60)
-            to_date = date.today() + timedelta(days=60)
-            # Attempt to acquire the periodic lock so we don't overlap with the hourly
-            # periodic_fetcher (which uses the same lock). If the periodic fetcher is
-            # currently running, skip the prefetch this cycle.
-            got_lock = _periodic_lock.acquire(blocking=False)
-            if not got_lock:
-                print('Daily prefetch skipped because periodic fetcher is running')
-            else:
-                try:
-                    print('Starting daily two-month prefetch for all calendars')
-                    # Use Rooms_PUBLISHER CSV as authoritative; if missing, skip prefetch
-                    urls_with_names = read_rooms_publisher_csv()
-                    if not urls_with_names:
-                        print('Daily prefetch: publisher CSV not found or empty; skipping')
-                        urls_with_names = []
-
-                    any_ok = False
-                    for entry in urls_with_names:
-                        try:
-                            u, name = entry[0], entry[1]
-                            html_fallback = entry[2] if len(entry) >= 3 else None
-                            rc = _run_extractor_for_url(u, name, html_url=html_fallback)
-                            if rc == 0:
-                                any_ok = True
-                        except Exception:
-                            pass
-
-                    # If any extraction succeeded, rebuild the schedule for the two-month window
-                    if any_ok:
-                        try:
-                            ensure_schedule(from_date, to_date)
-                            print('Daily two-month schedule rebuild completed')
-                        except Exception as e:
-                            print('Daily schedule rebuild failed:', e)
-                finally:
-                    try:
-                        _periodic_lock.release()
-                    except Exception:
-                        pass
-        except Exception as e:
-            print('Daily prefetch failed:', e)
 
 
 def start_daily_cleanup_if_needed(cutoff_days: int = 60):
@@ -2592,7 +2035,6 @@ def calendars_json():
             result[url_hash] = {
                 'name': cal.get('name') or f"Calendar {cal.get('id')}",
                 'color': cal.get('color'),
-                'url': url,
                 'building': cal.get('building') or None,
                 'room': cal.get('room') or None,
                 'enabled': cal.get('enabled')
@@ -2603,82 +2045,30 @@ def calendars_json():
     return jsonify({})
 
 
-@app.route('/events.json')
-def events_json():
-    """Return flattened events for FullCalendar or API clients.
+_normalized_events_lock = threading.Lock()
+_normalized_events_cache = None
+_EMPTY_CALENDAR_MAP = {}
 
-    Query params: from, to, subject, professor
-    Always fetches and stores events for the next 2 months by default.
-    """
-    # Import the event parser
-    try:
-        from tools.event_parser import parse_event, parse_title, parse_location
-    except ImportError:
-        parse_event = None
-        parse_title = None
-        parse_location = None
-    from_s = request.values.get('from')
-    to_s = request.values.get('to')
-    subject_filter = (request.values.get('subject') or '').strip().lower()
-    professor_filter = (request.values.get('professor') or '').strip().lower()
-    room_filter = (request.values.get('room') or '').strip().lower()
-    today = date.today()
-    
-    # Always ensure we have an extended window of events stored (full semester)
-    default_future = today + timedelta(days=240)
-    
-    try:
-        from_date = date.fromisoformat(from_s) if from_s else today
-    except Exception:
-        from_date = today
-    try:
-        to_date = date.fromisoformat(to_s) if to_s else default_future
-    except Exception:
-        to_date = default_future
 
-    # ensure schedule exists
-    try:
-        jpath, cpath = ensure_schedule(from_date, to_date)
-    except Exception as exc:
-        # No schedule available yet - return empty array (not 500 error)
-        app.logger.warning('ensure_schedule failed: %s', exc)
-        return jsonify([])
+def _normalized_schedule_events(schedule, _cmap_for_events):
+    global _normalized_events_cache
+    with _normalized_events_lock:
+        cached = _normalized_events_cache
+        if cached and cached[0] is schedule and cached[1] is _cmap_for_events:
+            return cached[2]
+        events = _build_normalized_schedule_events(schedule, _cmap_for_events)
+        _normalized_events_cache = (schedule, _cmap_for_events, events)
+        return events
 
-    if not jpath or not os.path.exists(jpath):
-        app.logger.warning('schedule file missing after ensure_schedule: %s', jpath)
-        return jsonify([])
 
-    # Use cached schedule data to avoid re-reading the JSON file on every request
-    schedule = _read_json_cached(str(jpath))
-    if schedule is None:
-        return jsonify([])
-
-    # Load calendar_map once (not per-event) using cached reader
-    _cmap_for_events = _read_json_cached(
-        str(pathlib.Path('playwright_captures') / 'calendar_map.json')
-    ) or {}
-
-    events = []
-    # Only filter by date when explicit from/to query params were provided.
-    # Without params the frontend may be on a different date than the schedule
-    # data (e.g. schedule contains future-semester dates). Returning everything
-    # lets the frontend pick the right slice.
-    has_date_filter = bool(from_s or to_s)
-    from_iso = from_date.isoformat() if has_date_filter else None
-    to_iso = to_date.isoformat() if has_date_filter else None
+def _build_normalized_schedule_events(schedule, _cmap_for_events):
+    from tools.event_parser import parse_event
+    events = {}
     for room, days in schedule.items():
         for day, evs in days.items():
-            # Fast skip: if the day key is a date string, compare directly
-            if has_date_filter and (day < from_iso or day > to_iso):
-                continue
             for e in evs:
                 start = e.get('start')
                 end = e.get('end')
-                # Filter individual events by from/to range
-                if has_date_filter and start:
-                    ev_date = start[:10]  # 'YYYY-MM-DD'
-                    if ev_date < from_iso or ev_date > to_iso:
-                        continue
                 title = e.get('title') or ''
                 location = e.get('location') or ''
 
@@ -2690,7 +2080,7 @@ def events_json():
                 parsed_prof = e.get('professor') or ''
                 parsed_building = e.get('building') or ''
                 parsed_room = ''
-                display_title = title
+                display_title = e.get('display_title') or title
                 parsed_year = e.get('year') or ''
                 parsed_group = e.get('group') or ''
                 has_structured = bool(e.get('activity_type') or e.get('raw_title'))
@@ -2713,14 +2103,6 @@ def events_json():
                 prof = parsed_prof or (e.get('professor') or '')
                 building = parsed_building or ''
                 room_parsed = room or parsed_room
-
-                hay = (title + ' ' + subject + ' ' + display_title).lower()
-                if subject_filter and subject_filter not in hay:
-                    continue
-                if professor_filter and professor_filter not in (prof or '').lower():
-                    continue
-                if room_filter and room_filter not in room.lower() and room_filter not in room_parsed.lower():
-                    continue
 
                 ev = {
                     'title': title,
@@ -2762,7 +2144,7 @@ def events_json():
                 # Try to parse group/year from calendar_name or title if parser didn't find it
                 try:
                     from tools.event_parser import parse_group_from_string
-                    if not ev.get('year'):
+                    if not ev.get('year') and not ev.get('group'):
                         sample = ev.get('calendar_name') or ev.get('title') or ''
                         grp = parse_group_from_string(sample)
                         if grp and isinstance(grp, dict):
@@ -2772,7 +2154,76 @@ def events_json():
                 except Exception:
                     pass
 
-                events.append(ev)
+                events.setdefault(day, []).append(ev)
+
+    return events
+
+
+@app.route('/events.json')
+def events_json():
+    """Return flattened events for FullCalendar or API clients.
+
+    Query params: from, to, subject, professor
+    Always fetches and stores events for the next 2 months by default.
+    """
+    # Import the event parser
+    try:
+        from tools.event_parser import parse_event, parse_title, parse_location
+    except ImportError:
+        parse_event = None
+        parse_title = None
+        parse_location = None
+    from_s = request.values.get('from')
+    to_s = request.values.get('to')
+    subject_filter = (request.values.get('subject') or '').strip().lower()
+    professor_filter = (request.values.get('professor') or '').strip().lower()
+    room_filter = (request.values.get('room') or '').strip().lower()
+    group_filter = (request.values.get('group') or '').strip().lower()
+    today = date.today()
+
+    # Always ensure we have an extended window of events stored (full semester)
+    default_future = today + timedelta(days=240)
+
+    try:
+        from_date = date.fromisoformat(from_s) if from_s else today
+    except Exception:
+        from_date = today
+    try:
+        to_date = date.fromisoformat(to_s) if to_s else default_future
+    except Exception:
+        to_date = default_future
+
+    if to_date < from_date:
+        return jsonify({'error': 'to must be on or after from'}), 400
+
+    # ensure schedule exists
+    try:
+        jpath, cpath = ensure_schedule(from_date, to_date)
+    except Exception as exc:
+        # No schedule available yet - return empty array (not 500 error)
+        app.logger.warning('ensure_schedule failed: %s', exc)
+        return jsonify([])
+
+    if not jpath or not os.path.exists(jpath):
+        app.logger.warning('schedule file missing after ensure_schedule: %s', jpath)
+        return jsonify([])
+
+    # Use cached schedule data to avoid re-reading the JSON file on every request
+    schedule = _read_json_cached(str(jpath))
+    if not isinstance(schedule, dict):
+        return jsonify([])
+
+    # Load calendar_map once (not per-event) using cached reader
+    _cmap_for_events = _read_json_cached(
+        str(pathlib.Path('playwright_captures') / 'calendar_map.json')
+    ) or _EMPTY_CALENDAR_MAP
+
+    has_date_filter = bool(from_s or to_s)
+    events = []
+    for day, day_events in _normalized_schedule_events(schedule, _cmap_for_events).items():
+        if has_date_filter and not (from_date.isoformat() <= day <= to_date.isoformat()):
+            continue
+        events.extend(day_events)
 
     # Append manual admin events from DB
     try:
@@ -2789,7 +2240,7 @@ def events_json():
                     d = dtparser.parse(start_dt).date()
                 except Exception:
                     continue
-                if d < from_date or d > to_date:
+                if has_date_filter and (d < from_date or d > to_date):
                     continue
                 ev_obj = {
                     'title': me.get('title'),
@@ -2822,7 +2273,7 @@ def events_json():
                 ev_date = dtparser.parse(d).date()
             except Exception:
                 continue
-            if ev_date < from_date or ev_date > to_date:
+            if has_date_filter and (ev_date < from_date or ev_date > to_date):
                 continue
             time_s = (xe.get('time') or '').strip()
             if time_s:
@@ -2853,10 +2304,21 @@ def events_json():
     except Exception:
         pass
 
-    return jsonify(events)
+    disabled_sources = _disabled_sources()
+
+    def matches(ev):
+        if ev.get('source') in disabled_sources:
+            return False
+        subject = ' '.join(str(ev.get(k) or '') for k in ('title', 'subject', 'display_title')).lower()
+        return (not subject_filter or subject_filter in subject) and (
+            not professor_filter or professor_filter in str(ev.get('professor') or '').lower()) and (
+            not room_filter or room_filter in str(ev.get('room') or '').lower()) and (
+            not group_filter or group_filter in str(ev.get('group') or '').lower())
+    return jsonify([ev for ev in events if matches(ev)])
 
 
 @app.route('/export_room')
+@require_admin
 def export_room():
     """Render a printable timetable for a single room and optionally export to PDF/PNG.
 
@@ -2915,48 +2377,43 @@ def export_room():
     html = render_template('room_print.html', room=room, events=events, from_date=from_date, to_date=to_date)
 
     fmt = (request.values.get('format') or 'pdf').lower()
+    if fmt == 'html':
+        return html
     if fmt not in ('pdf', 'png', 'jpg', 'jpeg'):
-        fmt = 'pdf'
-
-    # If client requested PDF/PNG, try to render with Playwright
-    if fmt in ('pdf', 'png', 'jpg', 'jpeg'):
+        return 'Unsupported format', 400
+    if (to_date - from_date).days > 31 or to_date < from_date:
+        return 'Export range must be ordered and at most 31 days.', 400
+    from io import BytesIO
+    from werkzeug.utils import secure_filename
+    with file_lock(pathlib.Path('playwright_captures') / '.export.lock', blocking=False) as acquired:
+        if not acquired:
+            return 'Another export is being rendered. Try again shortly.', 429
         try:
             from playwright.sync_api import sync_playwright
+            with sync_playwright() as playwright:
+                browser = playwright.chromium.launch()
+                try:
+                    page = browser.new_page(java_script_enabled=False)
+                    page.route('**/*', lambda route: route.abort())
+                    page.set_content(html, wait_until='domcontentloaded', timeout=15000)
+                    if fmt == 'pdf':
+                        content = page.pdf(format='A4', print_background=True)
+                        suffix = 'pdf'
+                    else:
+                        suffix = 'jpeg' if fmt in ('jpg', 'jpeg') else 'png'
+                        content = page.screenshot(type=suffix, full_page=True)
+                finally:
+                    browser.close()
         except Exception:
-            return "Playwright is not available on the server; cannot export to PDF/image.", 500
-
-        tmpd = pathlib.Path(tempfile.mkdtemp(prefix='export_room_'))
-        html_path = tmpd / 'room.html'
-        out_path = tmpd / ('room.pdf' if fmt == 'pdf' else 'room.png')
-        with open(html_path, 'w', encoding='utf-8') as fh:
-            fh.write(html)
-        try:
-            with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
-                page.goto('file://' + str(html_path.resolve()))
-                page.wait_for_timeout(250)
-                if fmt == 'pdf':
-                    page.pdf(path=str(out_path), format='A4', print_background=True)
-                else:
-                    page.screenshot(path=str(out_path), full_page=True)
-                browser.close()
-        except Exception as e:
-            return f'Failed to render export: {e}', 500
-
-        # send file as attachment
-        filename = f"{room.replace(' ', '_')}_{from_date.isoformat()}_{to_date.isoformat()}.{out_path.suffix.lstrip('.') }"
-        # use download_name for newer Flask versions
-        try:
-            return send_file(str(out_path), as_attachment=True, download_name=filename)
-        except TypeError:
-            return send_file(str(out_path), as_attachment=True)
-
-    # fallback: return HTML
-    return html
+            app.logger.exception('Room export failed')
+            return 'Could not render room export.', 500
+    filename = secure_filename(f'{room}_{from_date}_{to_date}.{suffix}')
+    return send_file(BytesIO(content), as_attachment=True, download_name=filename,
+                     mimetype='application/pdf' if suffix == 'pdf' else f'image/{suffix}')
 
 
 @app.route('/generate_events', methods=['POST'])
+@require_admin
 def generate_events():
     """Run the extractor script as a subprocess and show its output as diagnostics.
 
@@ -2977,76 +2434,65 @@ def generate_events():
     return jsonify({'started': True, 'message': 'Extractor started'}), 202
 
 
+def _read_log_tail(path, limit=2000):
+    try:
+        with open(path, 'rb') as handle:
+            handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, handle.tell() - limit))
+            return handle.read(limit).decode('utf-8', errors='replace')
+    except (OSError, TypeError):
+        return ''
+
+
 @app.route('/generate_status')
+@require_admin
 def generate_status():
     """Return current extractor status and small tails of logs."""
     state = dict(extractor_state)
-    # attach small tails of logs if available
-    try:
-        if state.get('stdout_path') and os.path.exists(state['stdout_path']):
-            with open(state['stdout_path'], 'r', encoding='utf-8') as f:
-                data = f.read()
-                state['stdout_tail'] = data[-300:]
-        else:
-            state['stdout_tail'] = ''
-    except Exception:
-        state['stdout_tail'] = ''
-    try:
-        if state.get('stderr_path') and os.path.exists(state['stderr_path']):
-            with open(state['stderr_path'], 'r', encoding='utf-8') as f:
-                data = f.read()
-                state['stderr_tail'] = data[-300:]
-        else:
-            state['stderr_tail'] = ''
-    except Exception:
-        state['stderr_tail'] = ''
-
+    state['stdout_tail'] = _read_log_tail(state.get('stdout_path'), 300)
+    state['stderr_tail'] = _read_log_tail(state.get('stderr_path'), 300)
     return jsonify(state)
 
 
 @app.route('/download/<path:filename>')
+@require_admin
 def download_file(filename: str):
-    # Allow downloads from a few safe locations: playwright_captures, config,
-    # and repository root. This keeps the simple security model while making
-    # it robust to different working-directory/resolve behaviors on macOS.
-    candidates = [
-        pathlib.Path('playwright_captures') / filename,
-        pathlib.Path('config') / filename,
-        pathlib.Path(filename),
-    ]
-    for p in candidates:
-        try:
-            if p.exists() and p.is_file():
-                # ensure file is inside repository (avoid absolute unexpected paths)
-                repo_root = pathlib.Path(__file__).parent.resolve()
-                try:
-                    resolved = p.resolve()
-                except Exception:
-                    # if resolve fails, skip this candidate
-                    continue
-                if str(resolved).startswith(str(repo_root)):
-                    return send_file(str(resolved), as_attachment=True, download_name=p.name)
-        except Exception:
-            continue
-    return "Not found", 404
+    # Export allowlist: never expose repository files, databases, or credentials.
+    allowed = {'schedule_by_room.json', 'schedule_by_room.csv', 'calendar_full.ics'}
+    if filename == 'Rooms_PUBLISHER_HTML-ICS(in).csv':
+        root = (pathlib.Path(__file__).parent / 'config').resolve()
+        path = (root / filename).resolve()
+        if path.parent != root or not path.is_file():
+            return 'Not found', 404
+        return send_file(path, as_attachment=True, download_name=filename)
+    if filename not in allowed:
+        return 'Not found', 404
+    root = pathlib.Path('playwright_captures').resolve()
+    path = (root / filename).resolve()
+    if path.parent != root or not path.is_file():
+        return 'Not found', 404
+    return send_file(path, as_attachment=True, download_name=filename)
 
 
 @app.route('/__last_response')
+@require_admin
 def last_response():
     path = 'last_ics_response.html'
     if os.path.exists(path):
-        return send_file(path)
+        return send_file(path, as_attachment=True)
     return "No last response saved.", 404
 
 
 @app.route('/__saved/<path:fname>')
+@require_admin
 def saved_response(fname: str):
-    # Only serve files that were created by our safe_name pattern
-    if not fname.startswith("last_response_"):
-        return "Not allowed", 403
-    if os.path.exists(fname):
-        return send_file(fname)
-    return "Not found", 404
+    if pathlib.Path(fname).name != fname or not fname.startswith('last_response_'):
+        return 'Not found', 404
+    root = pathlib.Path(__file__).parent.resolve()
+    path = (root / fname).resolve()
+    if path.parent != root or not path.is_file():
+        return 'Not found', 404
+    return send_file(path, as_attachment=True)
 
 
 @app.route('/departures')
@@ -3077,7 +2523,7 @@ def departures_view():
         from event_parser import parse_location, parse_title, parse_event
     except ImportError:
         from tools.event_parser import parse_location, parse_title, parse_event
-    
+
     # Building map for the dropdown (code -> display name)
     # Template expects a mapping so it can call `buildings.items()` and `buildings.get()`.
     BUILDINGS = {
@@ -3087,10 +2533,10 @@ def departures_view():
         'observatorului': 'Observatorului',
         'memorandumului': 'Memorandumului',
     }
-    
+
     # Get selected building from query params (default: show all)
     selected_building = request.args.get('building', '').lower()
-    
+
     # Load events — primary source is schedule_by_room.json (built from per-calendar
     # events_*.json files). Fall back to the legacy events.json for any manually-added
     # or old-pipeline events not yet covered by the schedule.
@@ -3183,7 +2629,7 @@ def departures_view():
     except Exception:
         # ignore DB errors and continue with file-based events
         pass
-    
+
     # Get current datetime
     now = datetime.now()
     today = now.date()
@@ -3194,7 +2640,7 @@ def departures_view():
     # of the current week through Sunday so that weekend classes (common at
     # UTCN extension campuses) are visible even when checked on a weekday.
     # isoweekday(): Monday=1 … Sunday=7
-    days_until_sunday = 6 - today.isoweekday()  # 0 on Sunday already
+    days_until_sunday = 7 - today.isoweekday()  # 0 on Sunday already
     # Show at minimum today+tomorrow; extend to Sunday (up to +6 days)
     look_ahead = max(1, days_until_sunday)
     shown_dates = {today + timedelta(days=i) for i in range(look_ahead + 1)}
@@ -3211,7 +2657,10 @@ def departures_view():
     events_by_date: dict = {d: defaultdict(list) for d in sorted(shown_dates)}
     has_today_events = False
 
+    disabled_sources = _disabled_sources()
     for ev in all_events:
+        if ev.get('source') in disabled_sources:
+            continue
         start_str = ev.get('start')
         if not start_str:
             continue
@@ -3233,7 +2682,7 @@ def departures_view():
         # Only show dates in our look-ahead window
         if event_date not in shown_dates:
             continue
-        
+
         # Parse end time consistently and for today filter out events that already ended
         end_str = ev.get('end')
         end_dt = None
@@ -3262,7 +2711,7 @@ def departures_view():
                         continue
             except Exception:
                 pass
-        
+
         # Parse location
         location = ev.get('location') or ''
         parsed_loc = parse_location(location)
@@ -3290,7 +2739,7 @@ def departures_view():
         # Filter by building if selected
         if selected_building and building_code != selected_building:
             continue
-        
+
         # Parse title
         title = ev.get('title') or ''
         parsed_title = parse_title(title)
@@ -3356,7 +2805,8 @@ def admin_cleanup_old_events():
         # If DB_PATH is set to a tempdir (tests), use its parent as base_dir so file pruning
         # operates on the same test workspace. Otherwise default to current working dir.
         try:
-            base = pathlib.Path(DB_PATH).parent
+            db_parent = pathlib.Path(DB_PATH).parent
+            base = db_parent.parent if db_parent.name == 'data' else db_parent
         except Exception:
             base = None
         res = cleanup_old_events(cutoff_days=60, base_dir=base)
@@ -3373,7 +2823,7 @@ def admin_api_status():
     manual_events = []
     events_count = 0
     last_import = None
-    
+
     try:
         init_db()
         calendars = list_calendar_urls()
@@ -3397,7 +2847,7 @@ def admin_api_status():
             # fail quietly if CSV isn't present or parse fails
             pass
         manual_events = list_manual_events_db()
-        
+
         # Get events count from all events_*.json files.
         # Use stat-only counting to avoid opening hundreds of files on every
         # admin poll (which was a major source of FD exhaustion).
@@ -3416,7 +2866,7 @@ def admin_api_status():
                     last_import = mtime
             except Exception:
                 pass
-        
+
         # Also check main events.json if it exists (fallback)
         events_file = pathlib.Path('playwright_captures/events.json')
         if events_file.exists() and not event_files:
@@ -3483,7 +2933,7 @@ def admin_api_status():
             app.logger.exception('admin_api_status top-level error')
         except Exception:
             print('admin_api_status top-level error:', e)
-    
+
     # If extractor_state doesn't yet have a planned_order (no run started),
     # provide a lightweight CSV preview by reading the canonical publisher CSV
     # so the admin UI can show the planned extraction order without starting
@@ -3492,33 +2942,9 @@ def admin_api_status():
     if not planned:
         try:
             rows = read_rooms_publisher_csv()
-            planned = [name for (_url, name) in rows]
+            planned = [entry[1] for entry in rows]
         except Exception:
             planned = []
-
-    # Read full stdout/stderr files for the extractor (if present).
-    stdout_text = None
-    stderr_text = None
-    try:
-        out_path = pathlib.Path(__file__).parent / 'playwright_captures' / 'extract_stdout.txt'
-        if out_path.exists():
-            try:
-                with open(out_path, 'r', encoding='utf-8', errors='replace') as f:
-                    stdout_text = f.read()
-            except Exception:
-                stdout_text = None
-    except Exception:
-        stdout_text = None
-    try:
-        err_path = pathlib.Path(__file__).parent / 'playwright_captures' / 'extract_stderr.txt'
-        if err_path.exists():
-            try:
-                with open(err_path, 'r', encoding='utf-8', errors='replace') as f:
-                    stderr_text = f.read()
-            except Exception:
-                stderr_text = None
-    except Exception:
-        stderr_text = None
 
     # If a detached extractor subprocess was launched, detect it via the
     # saved pid (in-memory or on-disk) so the admin UI reports running while
@@ -3564,10 +2990,9 @@ def admin_api_status():
         last_written = None
         for p in files_sorted:
             try:
-                with open(p, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                    if isinstance(data, list) and len(data) > 0:
-                        nonzero_count += 1
+                data = _read_json_cached(str(p))
+                if isinstance(data, list) and data:
+                    nonzero_count += 1
                 last_written = p.name
             except Exception:
                 continue
@@ -3641,14 +3066,19 @@ def admin_set_calendar_url():
     url = request.form.get('calendar_url', '').strip()
     name = request.form.get('calendar_name') or request.form.get('calendar_name', '')
     color = request.form.get('calendar_color') or request.form.get('calendar_color', None)
-    
+
     # Check if this is an API call (wants JSON response)
     wants_json = request.headers.get('Accept', '').startswith('application/json') or request.is_json
-    
+
     if not url:
         if wants_json:
             return jsonify({'success': False, 'error': 'URL is required'}), 400
         return redirect(url_for('admin_index'))
+
+    try:
+        url = validate_calendar_url(url)
+    except UnsafeCalendarURL as exc:
+        return jsonify({'error': str(exc)}), 400
 
     # Ensure DB initialized and save calendar
     calendar_id = None
@@ -3674,12 +3104,11 @@ def admin_set_calendar_url():
             config['calendar_name'] = name
         if color:
             config['calendar_color'] = color
-        with open(config_file, 'w', encoding='utf-8') as f:
-            json.dump(config, f, indent=2)
+        atomic_write_json(config_file, config)
 
     # Immediately start importing events from this calendar in background
     if url and not extractor_state.get('running'):
-        t = threading.Thread(target=_run_extractor_for_url, args=(url,), daemon=True)
+        t = threading.Thread(target=_run_single_calendar_import, args=(url,), daemon=True)
         t.start()
         import_started = True
     else:
@@ -3694,309 +3123,96 @@ def admin_set_calendar_url():
             'import_started': import_started,
             'message': 'Calendar added and import started' if import_started else 'Calendar added (import already in progress)'
         })
-    
+
     return redirect(url_for('admin_index'))
 
 
 @app.route('/admin/upload_rooms_publisher', methods=['POST'])
 @require_admin
 def admin_upload_rooms_publisher():
-    """Accept an uploaded CSV and overwrite the canonical Rooms_PUBLISHER CSV in-place.
-
-    The uploaded file will be written to several repository locations where the
-    application looks for the publisher CSV (config/, playwright_captures/ and repo
-    root). Existing files are overwritten.
-    """
+    """Replace the room inventory without erasing independent event records."""
+    import io
+    from contextlib import ExitStack
+    from tools.room_csv import room_from_sala_name
+    from tools.storage import atomic_write_bytes
+    uploaded = request.files.get('file')
+    if not uploaded or not uploaded.filename:
+        return jsonify({'success': False, 'message': 'Choose a publisher CSV.'}), 400
+    content = uploaded.read()
     try:
-        if 'file' not in request.files:
-            return jsonify({'success': False, 'message': 'No file uploaded'}), 400
-        uploaded = request.files['file']
-        if not uploaded or uploaded.filename == '':
-            return jsonify({'success': False, 'message': 'No file selected'}), 400
-
-        content = uploaded.read()
-        csv_filename = 'Rooms_PUBLISHER_HTML-ICS(in).csv'
-        saved = []
-
-        # Try to write into config/ (backup existing first)
-        try:
-            cfg_dir = pathlib.Path(__file__).parent / 'config'
-            cfg_dir.mkdir(exist_ok=True)
-            target = cfg_dir / csv_filename
-            # backup existing file if present
-            try:
-                if target.exists():
-                    bak = cfg_dir / f"{csv_filename}.bak.{int(time.time())}"
-                    target.replace(bak)
-            except Exception:
-                # if backup fails, continue and overwrite below
-                pass
-            # atomic write via temp file
-            tmp = cfg_dir / f".{csv_filename}.tmp"
-            with open(tmp, 'wb') as out:
-                out.write(content)
-            tmp.replace(target)
-            saved.append(str(target))
-        except Exception:
-            pass
-
-        # Also save to playwright_captures/ for backward compatibility (backup existing)
-        try:
-            pc_dir = pathlib.Path(__file__).parent / 'playwright_captures'
-            pc_dir.mkdir(exist_ok=True)
-            target2 = pc_dir / csv_filename
-            try:
-                if target2.exists():
-                    bak2 = pc_dir / f"{csv_filename}.bak.{int(time.time())}"
-                    target2.replace(bak2)
-            except Exception:
-                pass
-            tmp2 = pc_dir / f".{csv_filename}.tmp"
-            with open(tmp2, 'wb') as out:
-                out.write(content)
-            tmp2.replace(target2)
-            saved.append(str(target2))
-        except Exception:
-            pass
-
-        # And try repo root (backup existing)
-        try:
-            root_target = pathlib.Path(__file__).parent / csv_filename
-            try:
-                if root_target.exists():
-                    bak3 = root_target.parent / f"{csv_filename}.bak.{int(time.time())}"
-                    root_target.replace(bak3)
-            except Exception:
-                pass
-            tmp3 = root_target.parent / f".{csv_filename}.tmp"
-            with open(tmp3, 'wb') as out:
-                out.write(content)
-            tmp3.replace(root_target)
-            saved.append(str(root_target))
-        except Exception:
-            pass
-
-        if not saved:
-            return jsonify({'success': False, 'message': 'Failed to save uploaded file'}), 500
-
-        # Before clearing state, try to stop any detached extractor process so
-        # the uploaded CSV becomes authoritative and no background runner is
-        # concurrently writing files from the old state.
-        try:
-            pc_dir = pathlib.Path(__file__).parent / 'playwright_captures'
-            pidfile = pc_dir / 'extract_detached.pid'
-            if pidfile.exists():
-                try:
-                    pid_text = pidfile.read_text(encoding='utf-8').strip()
-                    pid = int(pid_text)
-                except Exception:
-                    pid = None
-                if pid:
-                    try:
-                        # ask the process to terminate gracefully
-                        os.kill(pid, signal.SIGTERM)
-                        # wait a short while for it to exit
-                        for _ in range(10):
-                            time.sleep(0.5)
-                            try:
-                                os.kill(pid, 0)
-                            except OSError:
-                                break
-                        else:
-                            # still alive -> force kill
-                            try:
-                                os.kill(pid, signal.SIGKILL)
-                            except Exception:
-                                pass
-                    except Exception:
-                        pass
-                try:
-                    pidfile.unlink()
-                except Exception:
-                    pass
-            # clear in-memory extractor state hints
-            try:
-                extractor_state['running'] = False
-                extractor_state.pop('detached_pid', None)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # Immediately clear existing extracted events and calendar records so
-        # the upload fully replaces the current state. We remove per-calendar
-        # extracted files and clear DB tables for calendars and manual/extracurricular
-        # events. Any failure here should not prevent the upload, but will be
-        # logged to stderr.
-        try:
-            # ensure DB exists
+        rows = list(csv.reader(io.StringIO(content.decode('utf-8-sig'))))
+        if not rows or 'nume_sala' not in '|'.join(rows[0]).lower():
+            raise ValueError('Expected a publisher CSV header.')
+        calendars = {}
+        for row in rows[1:]:
+            if not any(row):
+                continue
+            if len(row) < 6 or not (row[4].strip() or row[5].strip()):
+                raise ValueError('Every room requires six columns and a calendar URL.')
+            for value in row[4:6]:
+                if value.strip():
+                    validate_calendar_url(value.strip())
+            url = row[5].strip() or row[4].strip()
+            if url in calendars:
+                raise ValueError('Duplicate calendar URLs are not allowed.')
+            calendars[url] = (row[0].strip(), row[1].strip(), row[2].strip(),
+                              room_from_sala_name(row[0]), row[4].strip() or None)
+        if not calendars or len(calendars) > 1000:
+            raise ValueError('Upload must contain between 1 and 1000 rooms.')
+    except (UnicodeError, ValueError, csv.Error) as exc:
+        return jsonify({'success': False, 'message': str(exc)}), 400
+    out_dir = pathlib.Path('playwright_captures')
+    try:
+        with file_lock(out_dir / '.full_extraction.lock', blocking=False) as acquired:
+            if not acquired:
+                return jsonify({'success': False, 'message': 'An import is running; retry after it finishes.'}), 409
             init_db()
-            with get_db_connection() as conn:
-                cur = conn.cursor()
-                try:
-                    cur.execute('DELETE FROM calendars')
-                except Exception:
-                    pass
-                try:
-                    cur.execute('DELETE FROM manual_events')
-                except Exception:
-                    pass
-                try:
-                    cur.execute('DELETE FROM extracurricular_events')
-                except Exception:
-                    pass
-                conn.commit()
-        except Exception:
-            pass
-
-        # Remove extracted per-calendar files and related artifacts so the
-        # freshly uploaded CSV will be the sole source for the next extraction.
-        try:
-            pc_dir = pathlib.Path(__file__).parent / 'playwright_captures'
-            # remove per-calendar event files
-            for p in pc_dir.glob('events_*.json'):
-                try:
-                    p.unlink()
-                except Exception:
-                    pass
-            # remove the generic events.json and mapping/misc files
-            for name in ('events.json', 'calendar_map.json', 'subject_mappings.json', 'page_after_clicks.html', 'schedule_by_room.json'):
-                p = pc_dir / name
-                try:
-                    if p.exists():
-                        p.unlink()
-                except Exception:
-                    pass
-            # Write minimal placeholder files so frontends requesting these
-            # resources during the import do not receive 500 errors.
-            try:
-                (pc_dir / 'events.json').write_text('[]', encoding='utf-8')
-            except Exception:
-                pass
-            try:
-                (pc_dir / 'schedule_by_room.json').write_text('{}', encoding='utf-8')
-            except Exception:
-                pass
-            try:
-                (pc_dir / 'subject_mappings.json').write_text('{}', encoding='utf-8')
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        # Populate the calendars table from the uploaded CSV then run a full
-        # extraction (now -60d .. now +60d) in a separate process so the work
-        # is not tied to the lifetime of a Gunicorn worker thread. We use the
-        # helper scripts under tools/ for consistency: first populate the DB,
-        # then run the full extraction which will write per-calendar files.
-        started_import = False
-        try:
-            env = os.environ.copy()
-            env.setdefault('PYTHONUTF8', '1')
-            base = pathlib.Path(__file__).parent
-
-            # populate DB synchronously so run_full_extraction sees the new rows
-            try:
-                subprocess.run([sys.executable, str(base / 'tools' / 'populate_calendars_from_csv.py')], check=False, env=env, cwd=str(base))
-            except Exception:
-                pass
-
-            # Run an ICS-first repair pass synchronously so .ics calendars
-            # produce their per-calendar events_<sha8>.json immediately.
-            try:
-                # Run the ICS-repair script in a small wrapper that ensures the
-                # project root is on sys.path. Executing via -c avoids issues
-                # where Python's sys.path[0] points to the tools/ directory and
-                # `import timetable` fails.
-                wrapper = (
-                    'import sys; '
-                    'sys.path.insert(0, "' + str(base) + '"); '
-                    'exec(open("tools/ics_repair_from_csv.py").read())'
-                )
-                subprocess.run([sys.executable, '-c', wrapper], check=False, env=env, cwd=str(base))
-                # After ICS repair, build the merged schedule so the frontend
-                # can immediately show aggregated events (schedule_by_room.json)
-                # even before Playwright finishes HTML extraction.
-                try:
-                    subprocess.run([sys.executable, str(base / 'tools' / 'build_schedule_by_room.py')], check=False, env=env, cwd=str(base))
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            # Launch full extraction as a detached subprocess so it runs to
-            # completion independently of the web worker process.
-            try:
-                pc_dir = pathlib.Path(__file__).parent / 'playwright_captures'
-                pc_dir.mkdir(exist_ok=True)
-                out_path = pc_dir / 'extract_stdout.txt'
-                err_path = pc_dir / 'extract_stderr.txt'
-                # Prefer an explicit Python executable from the project venv if present
-                python_exec = os.environ.get('APP_PYTHON')
-                if not python_exec:
-                    # common venv locations in project root
-                    cand = [base / '.venv' / 'bin' / 'python3', base / '.venv' / 'bin' / 'python', base / 'env' / 'bin' / 'python3', base / 'env' / 'bin' / 'python']
-                    for c in cand:
-                        try:
-                            if c.exists():
-                                python_exec = str(c)
-                                break
-                        except Exception:
-                            continue
-                if not python_exec:
-                    python_exec = sys.executable
-
-                # Open files for Popen; use try/finally so FDs are always
-                # closed in the parent even if Popen raises.
-                out_f = open(out_path, 'a', encoding='utf-8')
-                err_f = open(err_path, 'a', encoding='utf-8')
-                try:
-                    # Use Popen so we don't block; start a new session so the child
-                    # detaches from the web worker and continues independently.
-                    proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=env, cwd=str(base), start_new_session=True, close_fds=True)
-                finally:
-                    # Close the FDs in the parent process immediately — the child
-                    # process inherited copies via close_fds=True + Popen.
-                    out_f.close()
-                    err_f.close()
-                # Record detached-run metadata so the admin UI can detect the
-                # background process and report that an import is in progress.
-                try:
-                    extractor_state['running'] = True
-                    extractor_state['last_started'] = datetime.utcnow().isoformat()
-                    extractor_state['stdout_path'] = str(out_path)
-                    extractor_state['stderr_path'] = str(err_path)
-                    extractor_state['progress_message'] = f'Detached extraction started (pid {proc.pid})'
-                    extractor_state['detached_pid'] = int(proc.pid)
-                    # write a pid file for cross-process detection (persisted)
-                    pidfile = pc_dir / 'extract_detached.pid'
-                    try:
-                        with open(pidfile, 'w', encoding='utf-8') as pf:
-                            pf.write(str(proc.pid))
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-                started_import = True
-            except Exception as e:
-                # fallback: try running extraction in-thread if Popen fails
-                try:
-                    _run_extractor_background()
-                    started_import = True
-                except Exception:
-                    started_import = False
-        except Exception:
-            started_import = False
-
-        # Don't leak file-system save locations back to the UI. Return a concise
-        # status message and let the admin UI refresh its status to pick up the
-        # new planned order / progress.
-        if started_import:
-            return jsonify({'success': True, 'message': 'Uploaded — full import scheduled'}), 202
-        else:
-            return jsonify({'success': True, 'message': 'Uploaded — import not started (error starting background job)'}), 200
-    except Exception as e:
-        return jsonify({'success': False, 'message': str(e)}), 500
+            old_calendars = list_calendar_urls()
+            urls = set(calendars) | {cal['url'] for cal in old_calendars if cal['url']}
+            with ExitStack() as stack:
+                for url in sorted(urls):
+                    h = hashlib.sha1(url.encode()).hexdigest()[:8]
+                    if not stack.enter_context(file_lock(out_dir / f'.calendar_{h}.lock', blocking=False)):
+                        return jsonify({'success': False, 'message': 'A calendar import is running; retry later.'}), 409
+                config = pathlib.Path(__file__).parent / 'config'
+                target = config / 'Rooms_PUBLISHER_HTML-ICS(in).csv'
+                if target.exists():
+                    atomic_write_bytes(target.with_name(target.name + '.bak'), target.read_bytes())
+                with get_db_connection() as conn:
+                    conn.execute('BEGIN IMMEDIATE')
+                    for url, (name, email, building, room, html_url) in calendars.items():
+                        conn.execute("""INSERT INTO calendars
+                            (url, name, email_address, building, room, html_url, enabled, created_at)
+                            VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+                            ON CONFLICT(url) DO UPDATE SET name=excluded.name,
+                            email_address=excluded.email_address, building=excluded.building,
+                            room=excluded.room, html_url=excluded.html_url""",
+                            (url, name, email, building, room, html_url, datetime.now().isoformat()))
+                    conn.execute('DELETE FROM calendars WHERE url NOT IN (' + ','.join('?' for _ in calendars) + ')', tuple(calendars))
+                    atomic_write_bytes(target, content)
+                wanted = {hashlib.sha1(url.encode()).hexdigest()[:8] for url in calendars}
+                for path in out_dir.glob('events_*.json'):
+                    if path.stem.removeprefix('events_') not in wanted:
+                        path.unlink(missing_ok=True)
+                metadata = {hashlib.sha1(url.encode()).hexdigest()[:8]: {
+                    'name': values[0], 'url': url, 'building': values[2], 'room': values[3],
+                } for url, values in calendars.items()}
+                update_json(out_dir / 'calendar_map.json', lambda old: {
+                    key: {**old.get(key, {}), **value} for key, value in metadata.items()
+                })
+                with _file_cache_lock:
+                    _file_cache.clear()
+                with _fp_cache_lock:
+                    _fp_cache['ts'] = 0
+    except Exception:
+        app.logger.exception('Could not update publisher inventory')
+        return jsonify({'success': False, 'message': 'Could not save publisher inventory.'}), 500
+    try:
+        _launch_full_extraction()
+    except Exception:
+        app.logger.exception('Could not start inventory import')
+        return jsonify({'success': False, 'message': 'Inventory saved, but the import could not start.'}), 500
+    return jsonify({'success': True, 'message': 'Inventory saved; import scheduled.'}), 202
 
 
 @app.route('/admin/import_calendar', methods=['POST'])
@@ -4008,7 +3224,7 @@ def admin_import_calendar():
     url = request.form.get('calendar_url') or request.form.get('url')
     name = request.form.get('calendar_name') or request.form.get('name')
     color = request.form.get('calendar_color') or request.form.get('color')
-    
+
     # Check JSON body for calendar_id
     calendar_id = None
     if request.is_json:
@@ -4033,6 +3249,10 @@ def admin_import_calendar():
 
     if url:
         try:
+            url = validate_calendar_url(url)
+        except UnsafeCalendarURL as exc:
+            return jsonify({'error': str(exc)}), 400
+        try:
             init_db()
             add_calendar_url(url, name)
             # update metadata (name/color) in case the calendar already existed
@@ -4051,72 +3271,17 @@ def admin_import_calendar():
 
     # If a specific URL was provided, run per-URL extractor in a thread
     if url:
-        t = threading.Thread(target=_run_extractor_for_url, args=(url, name), daemon=True)
+        t = threading.Thread(target=_run_single_calendar_import, args=(url, name), daemon=True)
         t.start()
         return jsonify({'success': True, 'message': 'Import started', 'url': url}), 202
 
-    # No url -> user asked to re-import ALL calendars. Launch the robust
-    # full extraction runner (`tools/run_full_extraction.py`) as a detached
-    # subprocess so it runs independently and writes the canonical
-    # `import_progress.json` / `import_complete.txt` markers the UI consumes.
     try:
-        base = pathlib.Path(__file__).parent
-        pc_dir = base / 'playwright_captures'
-        pc_dir.mkdir(exist_ok=True)
-        out_path = pc_dir / 'extract_stdout.txt'
-        err_path = pc_dir / 'extract_stderr.txt'
-        # Open files for Popen; use try/finally so FDs are always closed
-        # in the parent even if Popen raises.
-        out_f = open(out_path, 'a', encoding='utf-8')
-        err_f = open(err_path, 'a', encoding='utf-8')
-        # Prefer an explicit Python executable from the project venv if present
-        python_exec = os.environ.get('APP_PYTHON')
-        if not python_exec:
-            cand = [base / '.venv' / 'bin' / 'python3', base / '.venv' / 'bin' / 'python', base / 'env' / 'bin' / 'python3', base / 'env' / 'bin' / 'python']
-            for c in cand:
-                try:
-                    if c.exists():
-                        python_exec = str(c)
-                        break
-                except Exception:
-                    continue
-        if not python_exec:
-            python_exec = sys.executable
-
-        try:
-            proc = subprocess.Popen([python_exec, str(base / 'tools' / 'run_full_extraction.py')], stdout=out_f, stderr=err_f, env=os.environ.copy(), cwd=str(base), start_new_session=True, close_fds=True)
-        finally:
-            # Close the FDs in the parent — the child inherited copies.
-            out_f.close()
-            err_f.close()
-
-        # Record detached-run metadata for UI detection
-        try:
-            extractor_state['running'] = True
-            extractor_state['last_started'] = datetime.utcnow().isoformat()
-            extractor_state['stdout_path'] = str(out_path)
-            extractor_state['stderr_path'] = str(err_path)
-            extractor_state['progress_message'] = f'Detached full extraction started (pid {proc.pid})'
-            extractor_state['detached_pid'] = int(proc.pid)
-            pidfile = pc_dir / 'extract_detached.pid'
-            try:
-                with open(pidfile, 'w', encoding='utf-8') as pf:
-                    pf.write(str(proc.pid))
-            except Exception:
-                pass
-        except Exception:
-            pass
-
-        return jsonify({'success': True, 'message': 'Full import scheduled (detached)'}), 202
-    except Exception as e:
-        # fallback to in-thread run if Popen failed
-        try:
-            t = threading.Thread(target=_run_extractor_background, daemon=True)
-            t.start()
-            return jsonify({'success': True, 'message': 'Import started (background thread fallback)'}), 202
-        except Exception:
-            extractor_state['running'] = False
-            return jsonify({'success': False, 'message': f'Failed to start import: {e}'}), 500
+        _launch_full_extraction()
+        return jsonify({'success': True, 'message': 'Full import scheduled.'}), 202
+    except Exception:
+        extractor_state['running'] = False
+        app.logger.exception('Could not start calendar import')
+        return jsonify({'success': False, 'message': 'Could not start calendar import.'}), 500
 
 
 @app.route('/admin/add_event', methods=['POST'])
@@ -4124,7 +3289,7 @@ def admin_import_calendar():
 def admin_add_event():
     """Manually add an event."""
     from dateutil import parser as dtparser
-    
+
     title = request.form.get('title', '').strip()
     start_date = request.form.get('start_date', '')
     start_time = request.form.get('start_time', '')
@@ -4132,69 +3297,33 @@ def admin_add_event():
     location = request.form.get('location', '').strip()
     building = request.form.get('building', '').strip()
     room = request.form.get('room', '').strip()
-    
+
     if not title or not start_date or not start_time:
         return jsonify({'success': False, 'message': 'Missing required fields'}), 400
-    
+
     # Build location string if building/room provided
     if building and room and not location:
         location = f"utcn_room_ac_{building}_{room}@campus.utcluj.ro"
-    
-    # Parse datetime
+
+    # Store the same Romanian wall-clock ISO format used by the import pipeline.
     try:
-        start_str = f"{start_date}T{start_time}:00+02:00"
-        end_str = f"{start_date}T{end_time}:00+02:00" if end_time else None
-    except Exception as e:
-        return jsonify({'success': False, 'message': f'Invalid date/time: {e}'}), 400
-    
-    # Store manual event in DB and also append to playwright_captures/events.json for compatibility
+        start_dt = datetime.fromisoformat(f'{date.fromisoformat(start_date)}T{start_time}')
+        end_dt = datetime.fromisoformat(f'{date.fromisoformat(start_date)}T{end_time}') if end_time else None
+        if start_dt.tzinfo or (end_dt and (end_dt.tzinfo or end_dt <= start_dt)):
+            raise ValueError('End time must be after start time.')
+    except ValueError:
+        return jsonify({'success': False, 'message': 'Invalid date/time or event duration.'}), 400
     try:
         init_db()
-        new_event = {
-            'start': start_str,
-            'end': end_str,
-            'title': title,
-            'location': location,
-            'raw': {'manual': True},
-            'created_at': datetime.now().isoformat()
-        }
-        ev_id = add_manual_event_db(new_event)
-        # Append to playwright_captures/events.json as before
-        events_file = pathlib.Path('playwright_captures/events.json')
-        events = []
-        if events_file.exists():
-            try:
-                with open(events_file, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-            except Exception:
-                events = []
-        events.append(new_event)
-        events_file.parent.mkdir(exist_ok=True)
-        with open(events_file, 'w', encoding='utf-8') as f:
-            json.dump(events, f, indent=2, ensure_ascii=False)
+        ev_id = add_manual_event_db({
+            'start': start_dt.isoformat(), 'end': end_dt.isoformat() if end_dt else None,
+            'title': title, 'location': location, 'raw': {'manual': True},
+            'created_at': datetime.now().isoformat(),
+        })
         return jsonify({'success': True, 'message': 'Event added successfully', 'id': ev_id})
     except Exception:
-        # fallback to previous file-only behavior
-        events_file = pathlib.Path('playwright_captures/events.json')
-        events = []
-        if events_file.exists():
-            try:
-                with open(events_file, 'r', encoding='utf-8') as f:
-                    events = json.load(f)
-            except Exception:
-                events = []
-        new_event = {
-            'start': start_str,
-            'end': end_str,
-            'title': title,
-            'location': location,
-            'raw': {'manual': True}
-        }
-        events.append(new_event)
-        events_file.parent.mkdir(exist_ok=True)
-        with open(events_file, 'w', encoding='utf-8') as f:
-            json.dump(events, f, indent=2, ensure_ascii=False)
-        return jsonify({'success': True, 'message': 'Event added successfully'})
+        app.logger.exception('Could not save manual event')
+        return jsonify({'success': False, 'message': 'Could not save event.'}), 500
 
 
 @app.route('/admin/delete_event', methods=['POST'])
@@ -4205,22 +3334,21 @@ def admin_delete_event():
         index = int(request.form.get('index', -1))
     except ValueError:
         return jsonify({'success': False, 'message': 'Invalid index'}), 400
-    
+
     events_file = pathlib.Path('playwright_captures/events.json')
     if not events_file.exists():
         return jsonify({'success': False, 'message': 'No events file'}), 404
-    
+
     with open(events_file, 'r', encoding='utf-8') as f:
         events = json.load(f)
-    
+
     if index < 0 or index >= len(events):
         return jsonify({'success': False, 'message': 'Index out of range'}), 400
-    
+
     events.pop(index)
-    
-    with open(events_file, 'w', encoding='utf-8') as f:
-        json.dump(events, f, indent=2, ensure_ascii=False)
-    
+
+    atomic_write_json(events_file, events)
+
     return jsonify({'success': True, 'message': 'Event deleted'})
 
 
@@ -4235,7 +3363,7 @@ def admin_delete_calendar():
 
     try:
         init_db()
-        
+
         # 1. Get URL to identify files to delete
         url = None
         with get_db_connection() as conn:
@@ -4244,22 +3372,22 @@ def admin_delete_calendar():
             row = cur.fetchone()
             if row:
                 url = row['url']
-        
+
         if url:
             # 2. Delete associated files
             try:
                 h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
                 out_dir = pathlib.Path('playwright_captures')
-                
+
                 # Delete events file
                 events_file = out_dir / f'events_{h}.json'
                 if events_file.exists():
                     events_file.unlink()
-                
+
                 # Delete log files
                 (out_dir / f'extract_{h}.stdout.txt').unlink(missing_ok=True)
                 (out_dir / f'extract_{h}.stderr.txt').unlink(missing_ok=True)
-                
+
                 # 3. Update calendar_map.json
                 map_path = out_dir / 'calendar_map.json'
                 if map_path.exists():
@@ -4267,9 +3395,7 @@ def admin_delete_calendar():
                         with open(map_path, 'r', encoding='utf-8') as f:
                             cmap = json.load(f)
                         if h in cmap:
-                            del cmap[h]
-                            with open(map_path, 'w', encoding='utf-8') as f:
-                                json.dump(cmap, f, indent=2)
+                            update_json(map_path, lambda current: {k: v for k, v in current.items() if k != h})
                     except Exception:
                         pass
             except Exception as e:
@@ -4277,11 +3403,11 @@ def admin_delete_calendar():
 
         # 4. Delete from DB
         delete_calendar_db(cal_id)
-        
+
         # 5. Regenerate merged events and schedule
         today = date.today()
         ensure_schedule(today, today + timedelta(days=7))
-        
+
         return jsonify({'success': True, 'message': 'Calendar deleted and events removed'})
     except Exception as e:
         return jsonify({'success': False, 'message': f'Failed to delete calendar: {e}'}), 500
@@ -4313,7 +3439,7 @@ def admin_update_calendar_color():
             # Update the color
             cur.execute('UPDATE calendars SET color = ? WHERE id = ?', (color, cal_id))
             conn.commit()
-        
+
         # Also update calendar_map.json
         import hashlib
         h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
@@ -4323,12 +3449,10 @@ def admin_update_calendar_color():
                 with open(map_path, 'r', encoding='utf-8') as f:
                     cmap = json.load(f)
                 if h in cmap:
-                    cmap[h]['color'] = color
-                    with open(map_path, 'w', encoding='utf-8') as f:
-                        json.dump(cmap, f, indent=2, ensure_ascii=False)
+                    update_json(map_path, lambda current: {**current, h: {**current.get(h, {}), 'color': color}})
             except Exception:
                 pass
-        
+
         return jsonify({'success': True, 'message': 'Color updated'})
     except Exception as e:
         return jsonify({'success': False, 'message': f'Failed to update color: {e}'}), 500
@@ -4348,6 +3472,12 @@ def admin_update_calendar():
         new_url = request.form.get('url', '').strip()
     except Exception:
         return jsonify({'success': False, 'message': 'Invalid parameters'}), 400
+
+    if new_url:
+        try:
+            new_url = validate_calendar_url(new_url)
+        except UnsafeCalendarURL as exc:
+            return jsonify({'error': str(exc)}), 400
 
     try:
         init_db()
@@ -4373,7 +3503,7 @@ def admin_update_calendar():
             cur.execute('UPDATE calendars SET name = ?, color = ?, enabled = ? WHERE id = ?', 
                        (name, color or None, 1 if enabled_bool else 0, cal_id))
             conn.commit()
-        
+
         # Also update calendar_map.json
         h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
         map_path = pathlib.Path('playwright_captures') / 'calendar_map.json'
@@ -4382,13 +3512,10 @@ def admin_update_calendar():
                 with open(map_path, 'r', encoding='utf-8') as f:
                     cmap = json.load(f)
                 if h in cmap:
-                    cmap[h]['name'] = name
-                    cmap[h]['color'] = color
-                    with open(map_path, 'w', encoding='utf-8') as f:
-                        json.dump(cmap, f, indent=2, ensure_ascii=False)
+                    update_json(map_path, lambda current: {**current, h: {**current.get(h, {}), 'name': name, 'color': color}})
             except Exception:
                 pass
-        
+
         # Update events in events_{h}.json with new color
         if color:
             events_file = pathlib.Path('playwright_captures') / f'events_{h}.json'
@@ -4398,18 +3525,17 @@ def admin_update_calendar():
                         events = json.load(f)
                     for ev in events:
                         ev['color'] = color
-                    with open(events_file, 'w', encoding='utf-8') as f:
-                        json.dump(events, f, indent=2, ensure_ascii=False, default=str)
+                    atomic_write_json(events_file, events)
                 except Exception:
                     pass
-            
+
             # Regenerate merged events.json
             try:
                 today = date.today()
                 ensure_schedule(today, today + timedelta(days=7))
             except Exception:
                 pass
-        
+
         return jsonify({'success': True, 'message': 'Calendar updated'})
     except Exception as e:
         return jsonify({'success': False, 'message': f'Failed to update calendar: {e}'}), 500
@@ -4453,7 +3579,7 @@ def extracurricular_events_view():
                     events = json.load(f)
             except Exception:
                 events = []
-    
+
     # Sort by date
     from dateutil import parser as dtparser
     for ev in events:
@@ -4462,10 +3588,10 @@ def extracurricular_events_view():
         except:
             ev['_date'] = datetime.max
     events.sort(key=lambda x: x['_date'])
-    
+
     # Get unique categories for filtering
     categories = sorted(set(ev.get('category', 'Other') for ev in events))
-    
+
     # Parse titles so UI shows cleaned/display titles (apply subject parsing rules)
     try:
         from tools.event_parser import parse_title
@@ -4487,6 +3613,7 @@ def extracurricular_events_view():
 
 
 @app.route('/events/add', methods=['POST'])
+@require_admin
 def add_extracurricular_event():
     """Add a new extracurricular event."""
     title = request.form.get('title', '').strip()
@@ -4496,10 +3623,10 @@ def add_extracurricular_event():
     location = request.form.get('location', '').strip()
     category = request.form.get('category', '').strip()
     description = request.form.get('description', '').strip()
-    
+
     if not title or not date_str:
         return jsonify({'success': False, 'message': 'Title and date are required'}), 400
-    
+
     # Store in DB
     try:
         init_db()
@@ -4538,19 +3665,19 @@ def add_extracurricular_event():
             'created_at': datetime.now().isoformat()
         }
         events.append(new_event)
-        with open(events_file, 'w', encoding='utf-8') as f:
-            json.dump(events, f, indent=2, ensure_ascii=False)
+        atomic_write_json(events_file, events)
         return jsonify({'success': True, 'message': 'Event added successfully'})
 
 
 @app.route('/events/delete', methods=['POST'])
+@require_admin
 def delete_extracurricular_event():
     """Delete an extracurricular event."""
     try:
         event_id = int(request.form.get('id', -1))
     except ValueError:
         return jsonify({'success': False, 'message': 'Invalid event ID'}), 400
-    
+
     # Try DB deletion first
     try:
         init_db()
@@ -4564,8 +3691,7 @@ def delete_extracurricular_event():
         with open(events_file, 'r', encoding='utf-8') as f:
             events = json.load(f)
         events = [ev for ev in events if ev.get('id') != event_id]
-        with open(events_file, 'w', encoding='utf-8') as f:
-            json.dump(events, f, indent=2, ensure_ascii=False)
+        atomic_write_json(events_file, events)
         return jsonify({'success': True, 'message': 'Event deleted'})
 
 
@@ -4626,41 +3752,40 @@ def frontend_path_legacy(filename):
 def departures_json():
     """Return events for today and tomorrow as JSON for the departures board."""
     from dateutil import parser as dtparser
-    
+
     today = date.today()
     tomorrow = today + timedelta(days=1)
 
     # Build look-ahead set: today through Sunday of current week (mirrors
     # departures_view logic so weekend extension-campus classes are always shown).
-    days_until_sunday = 6 - today.isoweekday()
+    days_until_sunday = 7 - today.isoweekday()
     look_ahead = max(1, days_until_sunday)
     shown_dates = {today + timedelta(days=i) for i in range(look_ahead + 1)}
 
     # Load events from schedule (use cached reads)
     events_file = pathlib.Path('playwright_captures/events.json')
     all_events = []
-    
+
     loaded = _read_json_cached(str(events_file))
     if loaded and isinstance(loaded, list):
         # mark origin for debugging
-        for it in loaded:
-            if isinstance(it, dict):
-                it.setdefault('_origin', 'events_json')
-        all_events = list(loaded)  # copy so we don't mutate cache
-    
+        all_events = [dict(it, _origin='events_json') for it in loaded if isinstance(it, dict)]
+
     # Also load from schedule_by_room.json if available (cached)
     schedule_file = pathlib.Path('playwright_captures/schedule_by_room.json')
     schedule = _read_json_cached(str(schedule_file))
     if schedule and isinstance(schedule, dict):
         for room, days in schedule.items():
             for day, evs in days.items():
+                if day not in {d.isoformat() for d in shown_dates}:
+                    continue
                 for e in evs:
                     ec = dict(e)  # copy so we don't mutate cache
                     ec['room'] = room
                     if isinstance(ec, dict):
                         ec.setdefault('_origin', 'schedule_by_room')
                     all_events.append(ec)
-    
+
     # Add extracurricular events from DB
     try:
         init_db()
@@ -4684,7 +3809,7 @@ def departures_json():
             all_events.append(evt)
     except Exception:
         pass
-    
+
     # Add manual events from DB
     try:
         manual = list_manual_events_db()
@@ -4702,10 +3827,13 @@ def departures_json():
             all_events.append(evt)
     except Exception:
         pass
-    
+
     # Filter for the look-ahead window (today through Sunday, to show weekend classes)
     filtered = []
+    disabled_sources = _disabled_sources()
     for ev in all_events:
+        if ev.get('source') in disabled_sources:
+            continue
         start_str = ev.get('start')
         if not start_str:
             continue
@@ -4722,40 +3850,9 @@ def departures_json():
     # Improved deduplication: prefer events with more populated fields when duplicates
     deduped = []
     seen_map = {}  # map key_start_loc -> index in deduped
-    # Prepare duplicates debug file
-    try:
-        debug_out_dir = pathlib.Path('playwright_captures')
-        debug_out_dir.mkdir(parents=True, exist_ok=True)
-        dup_log_path = debug_out_dir / 'duplicates_debug.jsonl'
-    except Exception:
-        dup_log_path = None
-
-    def _log_duplicate(existing, incoming, key, reason=''):
-        try:
-            if not dup_log_path:
-                return
-            import time, json
-            rec = {
-                'ts': datetime.utcnow().isoformat(),
-                'key': key,
-                'reason': reason,
-                'existing': {
-                    'title': existing.get('title'),
-                    'start': existing.get('start'),
-                    'room': existing.get('room'),
-                    'origin': existing.get('_origin') if isinstance(existing, dict) else None,
-                },
-                'incoming': {
-                    'title': incoming.get('title'),
-                    'start': incoming.get('start'),
-                    'room': incoming.get('room'),
-                    'origin': incoming.get('_origin') if isinstance(incoming, dict) else None,
-                }
-            }
-            with open(dup_log_path, 'a', encoding='utf-8') as df:
-                df.write(json.dumps(rec, ensure_ascii=False) + '\n')
-        except Exception:
-            pass
+    def _log_duplicate(*args, **kwargs):
+        # Public polling must not append unbounded diagnostics to disk.
+        return
     import re
 
     def _normalize_location_for_key(ev: dict) -> str:
@@ -4815,7 +3912,7 @@ def departures_json():
             start = str(ev.get('start') or '').strip()
             loc = _normalize_location_for_key(ev)
             norm_title = str(ev.get('title') or '').strip().lower()
-            key_start_loc = f'SL:{start}|{loc}'
+            key_start_loc = (start, ev.get('source') or ev.get('building') or '', loc, norm_title)
 
             if key_start_loc in seen_map:
                 idx = seen_map[key_start_loc]
@@ -4832,7 +3929,7 @@ def departures_json():
         except Exception:
             deduped.append(ev)
     filtered = deduped
-    
+
     # ensure buildings var exists even if enrichment fails
     buildings = {}
 
@@ -4886,7 +3983,7 @@ def departures_json():
                     ev['building'] = ev.get('building') or ''
 
                 # parse group/year — fallback to calendar name if parser didn't find it above
-                if not ev.get('year'):
+                if not ev.get('year') and not ev.get('group'):
                     sample = ev.get('calendar_name') or ev.get('title') or ''
                     if parse_group_from_string:
                         try:
@@ -4937,7 +4034,7 @@ def departures_json():
                     code = m.group(1)
                     if code not in buildings:
                         buildings[code] = code
-    
+
     return jsonify({
         'events': filtered,
         'buildings': buildings,
@@ -4965,4 +4062,4 @@ if __name__ == "__main__":
     # system (e.g. macOS AirPlay Receiver). Default remains 5000.
     import os
     port = int(os.environ.get('PORT', '5000'))
-    app.run(debug=True, use_reloader=False, port=port)
+    app.run(debug=os.environ.get('FLASK_DEBUG') == '1', use_reloader=False, port=port)

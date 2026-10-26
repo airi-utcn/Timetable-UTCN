@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react'
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   CANONICAL_BUILDINGS, buildingLabel, normalizeBuilding,
-  formatHM, localDateStr, eventStatus, activityType, TYPE_LABELS,
+  formatHM, localDateStr, addLocalDays, eventStatus, activityType, TYPE_LABELS,
   typeChipClass, groupDisplay, roomDisplay, displayCalendarName,
 } from './lib'
 
@@ -85,7 +85,7 @@ export default function Departures() {
 
       if (!data || !data.events || data.events.length === 0) {
         const today = localDateStr(new Date())
-        const tomorrow = localDateStr(new Date(Date.now() + 86400000))
+        const tomorrow = localDateStr(addLocalDays(new Date(), 1))
         const res = await fetch('/events.json?from=' + today + '&to=' + tomorrow)
         if (!res.ok) throw new Error('HTTP ' + res.status)
         const evts = await res.json()
@@ -116,15 +116,15 @@ export default function Departures() {
 
   // rotate NOW / UPCOMING slides with a fade
   useEffect(() => {
+    let inner
     const t = setInterval(() => {
       setSlideVisible(false)
-      const inner = setTimeout(() => {
+      inner = setTimeout(() => {
         setSlideIndex(prev => prev + 1)
         setSlideVisible(true)
       }, 400)
-      return () => clearTimeout(inner)
     }, SLIDE_MS)
-    return () => clearInterval(t)
+    return () => { clearInterval(t); clearTimeout(inner) }
   }, [])
 
   // refresh on midnight so Today / Tomorrow flip correctly
@@ -135,7 +135,7 @@ export default function Departures() {
   }, [fetchDepartures])
 
   const today = localDateStr(now)
-  const tomorrow = localDateStr(new Date(now.getTime() + 86400000))
+  const tomorrow = localDateStr(addLocalDays(now, 1))
 
   const filteredEvents = useMemo(() => events.filter(ev => {
     if (!selectedBuilding) return true

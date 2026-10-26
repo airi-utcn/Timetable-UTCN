@@ -111,3 +111,51 @@ def test_all_day_event_handled():
     evs = parse_ics_text(ics, date(2026, 6, 1), date(2026, 6, 30))
     assert len(evs) == 1
     assert evs[0]['start'].startswith('2026-06-11T00:00')
+
+
+def test_subdaily_recurrence_rejected_before_expansion():
+    ics = _wrap('BEGIN:VEVENT\r\nUID:attack\r\nDTSTART:20260601T100000\r\n'
+                'DTEND:20260601T110000\r\nRRULE:FREQ=SECONDLY\r\nSUMMARY:Bad\r\nEND:VEVENT\r\n')
+    with pytest.raises(FetchError, match='Subdaily'):
+        parse_ics_text(ics, date(2026, 6, 1), date(2026, 6, 30))
+
+
+def test_fetch_rejects_redirect_to_private_host_and_closes_response(monkeypatch):
+    from tools import ics_fetch as fetcher
+    from unittest.mock import Mock
+    from tools.calendar_security import validate_calendar_url
+    monkeypatch.setattr(fetcher, 'validate_calendar_url', lambda url, **kw: validate_calendar_url(url))
+    response = Mock(status_code=302, headers={'Location': 'http://127.0.0.1/admin'})
+    session = Mock()
+    session.get.return_value = response
+    with pytest.raises(fetcher.FetchError):
+        fetcher.fetch_text('https://outlook.office365.com/calendar.ics', session)
+    assert session.get.call_count == 1
+    response.close.assert_called_once()
+
+
+def test_fetch_does_not_retry_permanent_http_error(monkeypatch):
+    from tools import ics_fetch as fetcher
+    from unittest.mock import Mock
+    monkeypatch.setattr(fetcher, 'validate_calendar_url', lambda url, **kw: url)
+    response = Mock(status_code=404, headers={})
+    session = Mock()
+    session.get.return_value = response
+    with pytest.raises(fetcher.FetchError, match='404'):
+        fetcher.fetch_text('https://outlook.office365.com/missing.ics', session)
+    assert session.get.call_count == 1
+    response.close.assert_called_once()
+
+
+def test_fetch_bounds_decompressed_response_size(monkeypatch):
+    from tools import ics_fetch as fetcher
+    from unittest.mock import Mock
+    monkeypatch.setattr(fetcher, 'validate_calendar_url', lambda url, **kw: url)
+    monkeypatch.setattr(fetcher, 'MAX_RESPONSE_BYTES', 5)
+    response = Mock(status_code=200, headers={}, encoding='utf-8')
+    response.iter_content.return_value = iter([b'123', b'456'])
+    session = Mock()
+    session.get.return_value = response
+    with pytest.raises(fetcher.FetchError, match='limit'):
+        fetcher.fetch_text('https://outlook.office365.com/calendar.ics', session)
+    response.close.assert_called_once()
