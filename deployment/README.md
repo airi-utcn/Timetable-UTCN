@@ -28,6 +28,17 @@ de simplul commit al acestor fișiere. Primul tag `production` apare după primu
 PR eligibil. Un push direct în `main`, inclusiv instalarea acestui workflow,
 rulează testele, dar nu publică o versiune de producție.
 
+Pentru prima verificare a fluxului, poate fi folosit un PR care modifică doar
+documentația. După aprobare și merge, verifică în GitHub Actions că jobul de
+publicare reușește, apoi rulează pe VM:
+
+```bash
+sudo docker pull ghcr.io/airi-utcn/timetable-utcn:production
+```
+
+Descărcarea confirmă accesul la imagine; deploy-ul efectiv se verifică separat
+în jurnalul serviciului `utcn-timetable-deploy.service`.
+
 ## Configurare GitHub, o singură dată
 
 1. În **Settings → Rules → Rulesets**, protejează `main`: cere PR, minimum o
