@@ -1,0 +1,16 @@
+# Overlay for the UTCN VM: 16 vCPU / 16 GB RAM. Build images in GitHub Actions.
+services:
+  timetable:
+    image: ${TIMETABLE_IMAGE:?Set TIMETABLE_IMAGE to the published image digest}
+    environment:
+      GUNICORN_WORKERS: ${VM_GUNICORN_WORKERS:-4}
+      GUNICORN_THREADS: ${VM_GUNICORN_THREADS:-4}
+      PLAYWRIGHT_CONCURRENCY: ${VM_PLAYWRIGHT_CONCURRENCY:-2}
+    deploy:
+      resources:
+        limits:
+          cpus: '12'
+          memory: 12G
+        reservations:
+          cpus: '2'
+          memory: 2G

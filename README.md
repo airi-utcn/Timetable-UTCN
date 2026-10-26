@@ -353,6 +353,12 @@ Stop the stack:
 docker compose down
 ```
 
+## Automatic deployment to the UTCN VM
+
+The repository includes GitHub Actions verification and image publication after an approved PR is merged into `main`. A VM-local systemd timer can pull the tested GHCR image and update the existing container with health checks and automatic image rollback. GitHub never needs SSH/VPN access or VM credentials.
+
+See [deployment/README.md](deployment/README.md) for the one-time setup, GitHub package access, existing-volume preservation, and the 16 GB RAM VM profile. These files do not activate deployment on the VM by themselves.
+
 ## Frontend Development
 
 Frontend scripts:

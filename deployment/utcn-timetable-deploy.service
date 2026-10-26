@@ -1,0 +1,15 @@
+[Unit]
+Description=Pull and deploy the approved UTCN timetable image
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/utcn-timetable-deploy.env
+ExecStart=/usr/local/sbin/utcn-timetable-pull-deploy
+StateDirectory=utcn-timetable-deploy
+UMask=0077
+TimeoutStartSec=20min
+Nice=10
+PrivateTmp=true
