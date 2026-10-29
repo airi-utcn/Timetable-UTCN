@@ -39,6 +39,11 @@ sudo docker pull ghcr.io/airi-utcn/timetable-utcn:production
 Descărcarea confirmă accesul la imagine; deploy-ul efectiv se verifică separat
 în jurnalul serviciului `utcn-timetable-deploy.service`.
 
+Înainte de merge, confirmă că PR-ul are un review **Approve** de la un alt
+colaborator cu drept de scriere, pentru ultimul commit. Un merge fără acest
+review trece testele, dar sare publicarea imaginii; aprobarea adăugată după
+merge nu declanșează retroactiv publicarea.
+
 ## Configurare GitHub, o singură dată
 
 1. În **Settings → Rules → Rulesets**, protejează `main`: cere PR, minimum o
