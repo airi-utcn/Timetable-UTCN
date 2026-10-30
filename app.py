@@ -392,6 +392,7 @@ def admin_index():
     manifest = _read_json_cached(str(pathlib.Path(__file__).parent / 'frontend/dist/.vite/manifest.json')) or {}
     admin_entry = manifest.get('src/admin-shell.js', {}).get('file')
     return render_template('admin_react.html', admin_asset='/' + admin_entry if admin_entry else None,
+                           admin_css=manifest.get('src/admin-shell.js', {}).get('css', []),
                            events_count=events_count,
                            last_import=datetime.fromtimestamp(last_import) if last_import else None,
                            extractor_running=extractor_running,
@@ -1198,13 +1199,16 @@ def _run_extractors_parallel(entries) -> int:
     return succeeded
 
 
-def _launch_full_extraction():
+def _launch_full_extraction(failed_only=False):
     """Detach imports from request lifetime and reap children while this worker lives."""
     base = pathlib.Path(__file__).parent.resolve()
     out_dir = base / 'playwright_captures'
     out_dir.mkdir(exist_ok=True)
     with (out_dir / 'extract_stdout.txt').open('a', encoding='utf-8') as stdout, (out_dir / 'extract_stderr.txt').open('a', encoding='utf-8') as stderr:
-        process = subprocess.Popen([sys.executable, str(base / 'tools/run_full_extraction.py')],
+        command = [sys.executable, '-u', str(base / 'tools/run_full_extraction.py')]
+        if failed_only:
+            command.append('--failed-only')
+        process = subprocess.Popen(command,
                                    cwd=base, stdout=stdout, stderr=stderr,
                                    start_new_session=True, close_fds=True)
     extractor_state.update(running=True, detached_pid=process.pid,
@@ -2827,6 +2831,15 @@ def admin_api_status():
     try:
         init_db()
         calendars = list_calendar_urls()
+        from tools.import_status import read_status, source_key
+        statuses = read_status()
+        for calendar in calendars:
+            calendar['import_status'] = statuses.get(source_key(calendar['url']))
+            for field in ('url', 'html_url'):
+                try:
+                    calendar[field + '_link'] = validate_calendar_url(calendar.get(field) or '')
+                except UnsafeCalendarURL:
+                    calendar[field + '_link'] = None
         # try to enrich calendars with friendly email address from the publisher CSV
         try:
             # Use the centralized CSV helper to build a map from calendar URL -> email
@@ -3021,6 +3034,13 @@ def admin_api_status():
                 import_progress = None
     except Exception:
         import_progress = None
+
+    # A completed full import must not remain running because of a stale PID.
+    if import_progress and import_progress.get('finished'):
+        from tools.storage import file_lock
+        with file_lock(pathlib.Path('playwright_captures/.full_extraction.lock'), blocking=False) as available:
+            if available:
+                extractor_running = False
 
     return jsonify({
         'calendars': calendars,
@@ -3260,8 +3280,18 @@ def admin_import_calendar():
         except Exception:
             pass
 
-    if extractor_state.get('running'):
-        return jsonify({'success': False, 'message': 'Import already in progress'}), 200
+    failed_only = request.form.get('failed_only') == '1'
+    if failed_only:
+        from tools.import_status import read_status, source_key
+        statuses = read_status()
+        if not any(c.get('enabled') and statuses.get(source_key(c['url']), {}).get('status') == 'failed'
+                   for c in list_calendar_urls()):
+            return jsonify({'success': False, 'message': 'No failed calendars to retry.'}), 409
+    from tools.storage import file_lock
+    with file_lock(pathlib.Path('playwright_captures/.full_extraction.lock'), blocking=False) as available:
+        busy = not available
+    if busy or extractor_state.get('running'):
+        return jsonify({'success': False, 'message': 'Import already in progress'}), 409
 
     # Update extractor state to show we're starting
     extractor_state['running'] = True
@@ -3276,7 +3306,7 @@ def admin_import_calendar():
         return jsonify({'success': True, 'message': 'Import started', 'url': url}), 202
 
     try:
-        _launch_full_extraction()
+        _launch_full_extraction(failed_only=failed_only)
         return jsonify({'success': True, 'message': 'Full import scheduled.'}), 202
     except Exception:
         extractor_state['running'] = False

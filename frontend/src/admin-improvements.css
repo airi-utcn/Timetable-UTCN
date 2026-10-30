@@ -1,0 +1,13 @@
+.import-summary { background: #fff; border: 1px solid #d9e2ee; border-radius: 12px; padding: 20px; margin: 20px 0; }
+.import-summary h2 { margin: 0 0 12px; color: #12365a; }
+.import-summary progress { width: 100%; accent-color: #1e40af; }
+.import-summary button, .calendar-controls button { padding: 8px 14px; border: 1px solid #c3cdd9; border-radius: 6px; background: #fff; color: #12365a; }
+button:disabled { opacity: .55; cursor: default; }
+.calendar-controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 16px 0; }
+.calendar-controls input, .calendar-controls select { padding: 9px; border: 1px solid #c3cdd9; border-radius: 6px; max-width: 100%; }
+.calendar-result { display: flex; flex-direction: column; font-size: .85rem; gap: 4px; overflow-wrap: anywhere; margin-top: 8px; }
+.calendar-result.failed { color: #a12727; }
+.calendar-result.success { color: #166534; }
+.calendar-links { display: flex; gap: 12px; margin-top: 8px; }
+.calendar-entry { flex-wrap: wrap; }
+.calendar-entry-info { flex: 1 1 280px; min-width: 0; }

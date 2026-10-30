@@ -34,6 +34,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 
 import hashlib
+from tools.import_status import read_status, record_result, source_key, error_summary
 
 # ensure project root is on path when run as a script from different CWDs
 proj_root = pathlib.Path(__file__).parent.parent
@@ -95,16 +96,19 @@ def write_events_file(h: str, events: list, cal: dict):
     atomic_write_json(ev_out, events)
 
 
-def main():
+def main(failed_only=False):
     with file_lock(OUT_DIR / '.full_extraction.lock', blocking=False) as acquired:
         if not acquired:
             print('Another full extraction is already running.')
             return 0
-        return _main()
+        return _main(failed_only)
 
 
-def _main():
+def _main(failed_only=False):
     calendars = get_enabled_calendars(DB)
+    if failed_only:
+        statuses = read_status(OUT_DIR)
+        calendars = [c for c in calendars if statuses.get(source_key(c['url']), {}).get('status') == 'failed']
     total = len(calendars)
     if not calendars:
         print('No enabled calendars found in DB')
@@ -133,13 +137,21 @@ def _main():
     failed_calendars = []
     progress_lock = threading.Lock()
     progress_path = OUT_DIR / 'import_progress.json'
+    started_at = datetime.now().astimezone().isoformat()
+    reasons = {}
+    stage = 'ics'
+    (OUT_DIR / 'import_complete.txt').unlink(missing_ok=True)
 
     def write_progress(last=None):
         try:
-            info = {'total': total, 'succeeded': ok, 'failed': fail, 'last': last}
+            info = {'total': total, 'succeeded': ok, 'failed': fail, 'last': last,
+                    'processed': ok + fail, 'zero_events': len(zero_event_rooms),
+                    'stage': stage, 'started_at': started_at, 'finished': False}
             atomic_write_json(progress_path, info)
         except Exception as e:
             print('Failed to write progress file:', e)
+
+    write_progress()
 
     # ── Phase 1: ICS fetch in parallel (bounded) ──
     playwright_queue = []
@@ -155,10 +167,12 @@ def _main():
         try:
             events = fetch_ics_events(url, from_d, to_d)
         except FetchError as e:
-            print(f'  ✗ ICS failed: {name} -> {e}')
+            reasons[h] = error_summary(e)
+            print(f'  ✗ ICS failed: {name} -> {reasons[h]}')
             return (cal, False, None)
         except Exception as e:  # never let one calendar kill the pool
-            print(f'  ✗ ICS unexpected error: {name} -> {e}')
+            reasons[h] = error_summary(e)
+            print(f'  ✗ ICS unexpected error: {name} -> {reasons[h]}')
             return (cal, False, None)
         write_events_file(h, events, cal)
         update_calendar_map({h: {
@@ -186,6 +200,7 @@ def _main():
                 success, n_events = False, None
             with progress_lock:
                 if success:
+                    record_result(OUT_DIR, cal, True, n_events)
                     ok += 1
                     if n_events == 0:
                         zero_event_rooms.append(cal.get('name') or cal['url'])
@@ -197,6 +212,8 @@ def _main():
 
     # ── Phase 2: Playwright fallback (limited concurrency) ──
     if playwright_queue:
+        stage = 'browser'
+        write_progress()
         env = os.environ.copy()
         env.setdefault('PYTHONUTF8', '1')
         print(f'Phase 2: Playwright extraction for {len(playwright_queue)} calendars '
@@ -271,10 +288,12 @@ def _main():
                     success, n_events = False, None
                 with progress_lock:
                     if success:
+                        record_result(OUT_DIR, cal, True, n_events)
                         ok += 1
                         if n_events == 0:
                             zero_event_rooms.append(cal.get('name') or cal['url'])
                     else:
+                        record_result(OUT_DIR, cal, False, error=reasons.get(sha8(cal['url']), 'ICS import failed') + '; browser fallback failed.')
                         fail += 1
                         failed_calendars.append(cal.get('name') or cal['url'])
                     write_progress(last=cal.get('name') or cal['url'])
@@ -311,6 +330,8 @@ def _main():
         print('Failed to write extraction report:', e)
 
     # ── Rebuild schedule for the same window ──
+    stage = 'schedule'
+    write_progress()
     print('Rebuilding schedule from', from_d.isoformat(), 'to', to_d.isoformat())
     cmd = [sys.executable, str(pathlib.Path('tools') / 'build_schedule_by_room.py'),
            '--from', from_d.isoformat(), '--to', to_d.isoformat()]
@@ -361,4 +382,7 @@ def _main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--failed-only', action='store_true')
+    sys.exit(main(parser.parse_args().failed_only))
