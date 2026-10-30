@@ -103,7 +103,9 @@ def test_download_export_attachment(client, auth):
 
 
 @pytest.mark.parametrize('url', [
-    'http://outlook.office365.com/calendar.ics', 'file:///etc/passwd',
+    'http://untrusted.example/calendar.ics', 'file:///etc/passwd',
+    'http://outlook.office365.com:8443/calendar.ics',
+    'http://user:pass@outlook.office365.com/calendar.ics',
     'https://127.0.0.1/calendar.ics', 'https://169.254.169.254/',
     'https://outlook.office365.com.attacker.test/',
     'https://outlook.office365.com@attacker.test/',
@@ -118,6 +120,33 @@ def test_unsafe_calendar_urls_are_rejected(url):
 def test_allowed_calendar_url():
     url = 'https://outlook.office365.com/owa/calendar/token/calendar.ics'
     assert validate_calendar_url(url) == url
+
+
+@pytest.mark.parametrize('host', ['outlook.office365.com', 'outlook.office.com', 'outlook.live.com'])
+@pytest.mark.parametrize('port', ['', ':80'])
+def test_legacy_outlook_links_are_upgraded_before_fetch(host, port):
+    assert validate_calendar_url(f'http://{host}{port}/calendar/token/calendar.ics?q=1') == (
+        f'https://{host}/calendar/token/calendar.ics?q=1')
+
+
+def test_custom_provider_http_is_still_rejected(monkeypatch):
+    monkeypatch.setenv('CALENDAR_ALLOWED_HOSTS', 'calendar.example.org')
+    with pytest.raises(UnsafeCalendarURL):
+        validate_calendar_url('http://calendar.example.org/calendar.ics')
+
+
+def test_browser_request_upgrades_legacy_outlook_url(monkeypatch):
+    from types import SimpleNamespace
+    from tools.calendar_security import restrict_browser_requests
+    monkeypatch.setattr('socket.getaddrinfo', lambda *a, **k: [(2, 1, 6, '', ('8.8.8.8', 443))])
+    handlers = []
+    restrict_browser_requests(SimpleNamespace(route=lambda pattern, handler: handlers.append(handler)))
+    continued = []
+    route = SimpleNamespace(request=SimpleNamespace(url='http://outlook.office365.com/calendar.html'),
+                            continue_=lambda **kwargs: continued.append(kwargs),
+                            abort=lambda: pytest.fail('Trusted legacy URL should be upgraded'))
+    handlers[0](route)
+    assert continued == [{'url': 'https://outlook.office365.com/calendar.html'}]
 
 
 def test_custom_host_cannot_resolve_to_private_ip(monkeypatch):

@@ -2,6 +2,7 @@
 
 Only HTTPS and explicitly trusted providers are allowed. Custom providers must
 be listed by exact hostname in CALENDAR_ALLOWED_HOSTS (comma separated).
+Legacy HTTP links for built-in Outlook providers are upgraded before access.
 """
 import ipaddress
 import os
@@ -33,6 +34,13 @@ def validate_calendar_url(url, *, browser_resource=False, resolve=False):
         port = parts.port
     except ValueError as exc:
         raise UnsafeCalendarURL('Invalid calendar URL.') from exc
+    # Older publisher CSVs contain HTTP Outlook links. Upgrade only exact
+    # built-in providers before any network access; never permit plaintext HTTP
+    # or extend this compatibility rule to arbitrary configured hosts.
+    if (parts.scheme == 'http' and host in DEFAULT_HOSTS and port in (None, 80)
+            and parts.username is None and parts.password is None and not parts.fragment):
+        parts = parts._replace(scheme='https', netloc=host)
+        port = None
     allowed = DEFAULT_HOSTS | {h.strip().lower() for h in
                               os.environ.get('CALENDAR_ALLOWED_HOSTS', '').split(',') if h.strip()}
     trusted = host in allowed
@@ -63,9 +71,12 @@ def restrict_browser_requests(context):
     """Check redirects and subresources as well as the initial navigation."""
     def route_request(route):
         try:
-            validate_calendar_url(route.request.url, browser_resource=True, resolve=True)
+            validated = validate_calendar_url(route.request.url, browser_resource=True, resolve=True)
         except UnsafeCalendarURL:
             route.abort()
         else:
-            route.continue_()
+            if validated != route.request.url:
+                route.continue_(url=validated)
+            else:
+                route.continue_()
     context.route('**/*', route_request)
