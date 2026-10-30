@@ -39,6 +39,17 @@ sudo docker pull ghcr.io/airi-utcn/timetable-utcn:production
 Descărcarea confirmă accesul la imagine; deploy-ul efectiv se verifică separat
 în jurnalul serviciului `utcn-timetable-deploy.service`.
 
+După activarea timerului, verifică fluxul complet cu un nou PR de documentație:
+după merge și publicarea imaginii, lasă timerul să pornească singur actualizarea,
+fără `docker pull` sau pornirea manuală a serviciului. Confirmă mesajul
+`Deployment healthy` în jurnal și compară revizia containerului cu commit-ul
+din `main`:
+
+```bash
+sudo journalctl -u utcn-timetable-deploy.service --since "15 minutes ago" --no-pager
+sudo docker inspect utcn-timetable --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}'
+```
+
 ## Configurare GitHub, o singură dată
 
 1. În **Settings → Rules → Rulesets**, protejează `main`: cere PR și verificările
