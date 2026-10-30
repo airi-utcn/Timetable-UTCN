@@ -51,8 +51,8 @@ jobs:
           TZ: Europe/Bucharest
       - run: npm run build
 
-  approval:
-    name: Verify approved merge
+  merge:
+    name: Verify merged PR
     needs: [backend, frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -61,20 +61,20 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      approved: ${{ steps.merge.outputs.approved }}
+      eligible: ${{ steps.merge.outputs.eligible }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - id: merge
-        run: python3 deployment/approved_merge.py
+        run: python3 deployment/merged_pr.py
         env:
           GH_TOKEN: ${{ github.token }}
 
   publish:
     name: Publish tested production image
-    needs: [approval]
-    if: needs.approval.outputs.approved == 'true'
+    needs: [merge]
+    if: needs.merge.outputs.eligible == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     concurrency:
