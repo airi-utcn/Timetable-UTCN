@@ -3,11 +3,11 @@
 Fluxul implementat este:
 
 ```text
-PR aprobat pentru ultimul commit și merged în main
+PR merged în main
                 ↓
 GitHub Actions: teste backend + frontend
                 ↓
-Verificare PR merged + aprobare validă de la un colaborator cu drept de scriere
+Verificare PR merged în main la commit-ul curent
                 ↓
 Build Docker amd64/arm64 → smoke test → tag production în GHCR
                 ↓ HTTPS, inițiat de VM
@@ -29,7 +29,7 @@ PR eligibil. Un push direct în `main`, inclusiv instalarea acestui workflow,
 rulează testele, dar nu publică o versiune de producție.
 
 Pentru prima verificare a fluxului, poate fi folosit un PR care modifică doar
-documentația. După aprobare și merge, verifică în GitHub Actions că jobul de
+documentația. După merge, verifică în GitHub Actions că jobul de
 publicare reușește, apoi rulează pe VM:
 
 ```bash
@@ -39,18 +39,11 @@ sudo docker pull ghcr.io/airi-utcn/timetable-utcn:production
 Descărcarea confirmă accesul la imagine; deploy-ul efectiv se verifică separat
 în jurnalul serviciului `utcn-timetable-deploy.service`.
 
-Înainte de merge, confirmă că PR-ul are un review **Approve** de la un alt
-colaborator cu drept de scriere, pentru ultimul commit. Un merge fără acest
-review trece testele, dar sare publicarea imaginii; aprobarea adăugată după
-merge nu declanșează retroactiv publicarea.
-
 ## Configurare GitHub, o singură dată
 
-1. În **Settings → Rules → Rulesets**, protejează `main`: cere PR, minimum o
-   aprobare, dismiss stale approvals, rezolvarea comentariilor și verificările
+1. În **Settings → Rules → Rulesets**, protejează `main`: cere PR și verificările
    `Backend tests` și `Frontend tests`. Blochează force-push și bypass-ul normal
-   al regulilor. Un autor nu își poate aproba propriul PR; este necesar un alt
-   colaborator cu drept de scriere.
+   al regulilor. Review-ul Approve este opțional pentru publicare.
 2. Permite GitHub Actions pentru repository și publicarea pachetelor GHCR în
    organizația `airi-utcn`. Workflow-ul folosește `GITHUB_TOKEN`, cu
    `packages: write` doar în jobul de publicare; nu este necesar un PAT de push.
@@ -61,11 +54,11 @@ merge nu declanșează retroactiv publicarea.
    Alternativ, autentifică Docker pe VM o singură dată cu un token separat
    `read:packages`. Acesta rămâne pe VM și nu este o parolă SSH/VPN.
 
-Gate-ul verifică PR-ul asociat exact commit-ului de merge, branch-ul țintă,
-ultimul review formal al fiecărui reviewer și faptul că aprobarea acoperă
-ultimul commit din PR. Un review cerând modificări și încă nerezolvat blochează
-publicarea. Verificarea GitHub API eșuată nu permite publicarea. Regula de
-branch rămâne necesară pentru a controla cine poate modifica workflow-ul.
+Gate-ul verifică PR-ul asociat exact commit-ului de merge, branch-ul țintă
+`main` și repository-ul. Nu cere review **Approve**; merge-ul autorizează
+publicarea. Un push direct fără PR merged nu publică. Verificarea GitHub API
+eșuată nu permite publicarea. Regulile de branch controlează cine poate face merge
+și modifica workflow-ul; aprobările pot rămâne opționale conform politicii echipei.
 
 Workflow-ul construiește ambele arhitecturi, verifică imaginea pe runnerul
 GitHub și promovează numai o versiune care încă este commit-ul curent din

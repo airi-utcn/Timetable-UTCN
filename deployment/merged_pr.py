@@ -1,8 +1,7 @@
-"""Allow production publication only for an approved PR merged at this commit."""
+"""Allow production publication only for a PR merged at this commit."""
 import json
 import os
 import re
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 
@@ -31,7 +30,7 @@ class GitHubAPI:
         raise ValueError('GitHub pagination limit exceeded')
 
 
-def approved_merge(api, repository, commit):
+def merged_pr(api, repository, commit):
     if not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', repository):
         raise ValueError('Invalid repository')
     if not re.fullmatch(r'[0-9a-f]{40}', commit):
@@ -43,39 +42,17 @@ def approved_merge(api, repository, commit):
                 and pull.get('base', {}).get('ref') == 'main'
                 and pull.get('base', {}).get('repo', {}).get('full_name', '').lower() == repository.lower()):
             continue
-        # Neutral comments do not dismiss an existing approval; formal review
-        # decisions do. Approvals must cover the final PR head before merging.
-        decisions = {}
-        reviews = sorted(api.pages(f'{prefix}/pulls/{pull["number"]}/reviews'),
-                         key=lambda item: item.get('submitted_at') or '')
-        for review in reviews:
-            login = review.get('user', {}).get('login')
-            if login and review.get('state') in {'APPROVED', 'CHANGES_REQUESTED', 'DISMISSED'}:
-                decisions[login] = review
-        approvals = []
-        blocked = False
-        for login, review in decisions.items():
-            if login == pull.get('user', {}).get('login'):
-                continue
-            permission = api.get(f'{prefix}/collaborators/{quote(login, safe="")}/permission')
-            if permission.get('permission') not in {'write', 'maintain', 'admin'}:
-                continue
-            if review['state'] == 'CHANGES_REQUESTED':
-                blocked = True
-            if review['state'] == 'APPROVED' and review.get('commit_id') == pull['head']['sha']:
-                approvals.append(login)
-        if approvals and not blocked:
-            return pull['number']
+        return pull['number']
     return None
 
 
 def main():
-    number = approved_merge(GitHubAPI(), os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_SHA'])
+    number = merged_pr(GitHubAPI(), os.environ['GITHUB_REPOSITORY'], os.environ['GITHUB_SHA'])
     eligible = number is not None
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
-        output.write(f'approved={str(eligible).lower()}\n')
+        output.write(f'eligible={str(eligible).lower()}\n')
     print(f'Production publication allowed for merged PR #{number}.' if eligible else
-          'No eligible approved merge at this commit; production publication skipped.')
+          'No eligible merged PR at this commit; production publication skipped.')
 
 
 if __name__ == '__main__':

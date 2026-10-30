@@ -5,7 +5,7 @@ import subprocess
 
 import pytest
 
-from deployment.approved_merge import approved_merge
+from deployment.merged_pr import merged_pr
 
 REPOSITORY = 'airi-utcn/Timetable-UTCN'
 COMMIT = 'a' * 40
@@ -24,59 +24,49 @@ class FakeGitHub:
         self.permission = 'write'
 
     def get(self, path):
-        if '/collaborators/' in path:
-            return {'permission': self.permission}
+        assert '/collaborators/' not in path
         return self.pull
 
     def pages(self, path):
-        return iter(self.reviews if path.endswith('/reviews') else self.linked)
+        assert not path.endswith('/reviews')
+        return iter(self.linked)
 
 
 def review(state='APPROVED', commit=HEAD, login='reviewer', submitted='2026-10-26T10:00:00Z'):
     return {'user': {'login': login}, 'state': state, 'commit_id': commit, 'submitted_at': submitted}
 
 
-def test_approved_merge_at_current_commit_can_publish():
-    assert approved_merge(FakeGitHub(), REPOSITORY, COMMIT) == 12
+def test_merged_pr_at_current_commit_can_publish():
+    assert merged_pr(FakeGitHub(), REPOSITORY, COMMIT) == 12
 
 
 def test_direct_push_cannot_publish():
     api = FakeGitHub()
     api.linked = []
-    assert approved_merge(api, REPOSITORY, COMMIT) is None
+    assert merged_pr(api, REPOSITORY, COMMIT) is None
 
 
 @pytest.mark.parametrize('field,value', [('merged', False), ('merge_commit_sha', 'c' * 40)])
 def test_unmerged_or_other_commit_cannot_publish(field, value):
     api = FakeGitHub()
     api.pull[field] = value
-    assert approved_merge(api, REPOSITORY, COMMIT) is None
+    assert merged_pr(api, REPOSITORY, COMMIT) is None
 
 
-def test_old_approval_does_not_cover_changed_pr_head():
-    assert approved_merge(FakeGitHub([review(commit='d' * 40)]), REPOSITORY, COMMIT) is None
+def test_merge_without_reviews_can_publish():
+    assert merged_pr(FakeGitHub([]), REPOSITORY, COMMIT) == 12
 
 
-def test_dismissed_approval_does_not_publish():
-    reviews = [review(), review('DISMISSED', submitted='2026-10-26T11:00:00Z')]
-    assert approved_merge(FakeGitHub(reviews), REPOSITORY, COMMIT) is None
+def test_other_target_branch_cannot_publish():
+    api = FakeGitHub([])
+    api.pull['base']['ref'] = 'develop'
+    assert merged_pr(api, REPOSITORY, COMMIT) is None
 
 
-def test_neutral_comment_preserves_formal_approval():
-    reviews = [review(), review('COMMENTED', submitted='2026-10-26T11:00:00Z')]
-    assert approved_merge(FakeGitHub(reviews), REPOSITORY, COMMIT) == 12
-
-
-def test_unresolved_changes_requested_blocks_publication():
-    api = FakeGitHub([review(), review('CHANGES_REQUESTED', login='other-maintainer')])
-    assert approved_merge(api, REPOSITORY, COMMIT) is None
-
-
-def test_public_reader_or_author_approval_is_not_sufficient():
-    api = FakeGitHub()
-    api.permission = 'read'
-    assert approved_merge(api, REPOSITORY, COMMIT) is None
-    assert approved_merge(FakeGitHub([review(login='author')]), REPOSITORY, COMMIT) is None
+def test_other_repository_cannot_publish():
+    api = FakeGitHub([])
+    api.pull['base']['repo']['full_name'] = 'other/repo'
+    assert merged_pr(api, REPOSITORY, COMMIT) is None
 
 
 @pytest.fixture
