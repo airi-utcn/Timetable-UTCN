@@ -1,3 +1,5 @@
+import ImportSummary, { CalendarImportStatus } from './ImportSummary'
+import './admin-improvements.css'
 import React from 'react'
     import ReactDOM from 'react-dom/client'
 
@@ -20,6 +22,9 @@ const displayCalendarName = (name) => {
 }
 
     function Admin() {
+        const [query, setQuery] = React.useState('')
+        const [statusFilter, setStatusFilter] = React.useState('all')
+        const [page, setPage] = React.useState(0)
         const [calendars, setCalendars] = React.useState([])
         const [loading, setLoading] = React.useState(true)
         const [importing, setImporting] = React.useState(false)
@@ -118,10 +123,10 @@ const displayCalendarName = (name) => {
                     setImportLog(prev => {
                         const lastMsg = prev.length > 0 ? prev[prev.length - 1].msg : ''
                         if (lastMsg !== data.extractor_progress.message) {
-                            return [...prev, { 
-                                time: new Date().toLocaleTimeString(), 
-                                msg: data.extractor_progress.message, 
-                                type: 'info' 
+                            return [...prev, {
+                                time: new Date().toLocaleTimeString(),
+                                msg: data.extractor_progress.message,
+                                type: 'info'
                             }]
                         }
                         return prev
@@ -135,7 +140,7 @@ const displayCalendarName = (name) => {
         }, [])
 
         // Initial load
-        React.useEffect(() => { 
+        React.useEffect(() => {
             fetchData()
             // expose a global helper so out-of-React controls (upload button)
             // can trigger an immediate refresh without reloading the page.
@@ -228,14 +233,17 @@ const displayCalendarName = (name) => {
             }
         }
 
-        const importCalendar = async () => {
+        const importCalendar = async (failedOnly = false) => {
             setImporting(true)
             setImportLog(prev => [...prev, { time: new Date().toLocaleTimeString(), msg: 'Starting import for all calendars...', type: 'info' }])
             try {
-                const res = await fetch('/admin/import_calendar', { method: 'POST' })
+                const body = new FormData()
+                if (failedOnly === true) body.set('failed_only', '1')
+                const res = await fetch('/admin/import_calendar', { method: 'POST', body })
                 const data = await res.json()
-                setImportLog(prev => [...prev, { time: new Date().toLocaleTimeString(), msg: data.message || 'Import started', type: 'success' }])
-                showMessage(data.message || 'Import started', 'success')
+                setImportLog(prev => [...prev, { time: new Date().toLocaleTimeString(), msg: data.message || 'Import started', type: res.ok ? 'success' : 'error' }])
+                showMessage(data.message || 'Import started', res.ok ? 'success' : 'error')
+                await fetchData(false)
             } catch (e) {
                 setImportLog(prev => [...prev, { time: new Date().toLocaleTimeString(), msg: 'Import error: ' + e.message, type: 'error' }])
                 showMessage('Import error', 'error')
@@ -284,8 +292,17 @@ const displayCalendarName = (name) => {
             }
         }
 
+        const matching = calendars.filter(cal => {
+            const text = [cal.name, cal.building, cal.room, cal.email_address].join(' ').toLowerCase()
+            return text.includes(query.toLowerCase()) && (statusFilter === 'all' ||
+                (statusFilter === 'unknown' ? !cal.import_status : cal.import_status?.status === statusFilter))
+        })
+        const pageCount = Math.max(1, Math.ceil(matching.length / 25))
+        const currentPage = Math.min(page, pageCount - 1)
+        const visibleCalendars = matching.slice(currentPage * 25, (currentPage + 1) * 25)
+
         if (loading) {
-            return React.createElement('div', { className: 'admin-loading', style: { padding: '2rem', textAlign: 'center' } }, 
+            return React.createElement('div', { className: 'admin-loading', style: { padding: '2rem', textAlign: 'center' } },
                 React.createElement('div', { className: 'spinner' }),
                 ' Loading...'
             )
@@ -360,9 +377,9 @@ const displayCalendarName = (name) => {
             ),
 
             // Stats
-            React.createElement('div', { className: 'admin-stats', style: { 
-                display: 'grid', 
-                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', 
+            React.createElement('div', { className: 'admin-stats', style: {
+                display: 'grid',
+                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
                 gap: '1rem',
                 marginBottom: '2rem'
             }},
@@ -375,91 +392,15 @@ const displayCalendarName = (name) => {
                     React.createElement('div', { style: { color: '#666' }}, 'Events')
                 ),
                 React.createElement('div', { style: { background: '#f8f9fa', padding: '1rem', borderRadius: '8px', textAlign: 'center' }},
-                    React.createElement('div', { style: { fontSize: '1rem', fontWeight: 'bold', color: '#003366' }}, 
+                    React.createElement('div', { style: { fontSize: '1rem', fontWeight: 'bold', color: '#003366' }},
                         stats.last_import ? new Date(stats.last_import * 1000).toLocaleString() : 'Never'
                     ),
                     React.createElement('div', { style: { color: '#666' }}, 'Last Import')
                 )
             ),
 
-            // Import Status Panel
-            (extractorRunning || importLog.length > 0) && React.createElement('div', { 
-                style: { 
-                    background: extractorRunning ? '#fff3cd' : '#e8f5e9', 
-                    border: extractorRunning ? '2px solid #ffc107' : '1px solid #c8e6c9',
-                    padding: '1rem', 
-                    borderRadius: '8px', 
-                    marginBottom: '2rem' 
-                }
-            },
-                React.createElement('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }},
-                    React.createElement('h3', { style: { margin: 0, color: extractorRunning ? '#856404' : '#2e7d32', display: 'flex', alignItems: 'center', gap: '0.5rem' }}, 
-                        extractorRunning ? 'Import in Progress...' : 'Import Complete'
-                    ),
-                    !extractorRunning && importLog.length > 0 && React.createElement('button', {
-                        onClick: () => setImportLog([]),
-                        style: { background: 'transparent', border: 'none', cursor: 'pointer', color: '#666', fontSize: '0.8rem' }
-                    }, 'Clear')
-                ),
-                // Show current progress details
-                extractorRunning && extractorProgress && React.createElement('div', {
-                    style: { 
-                        display: 'flex', 
-                        justifyContent: 'space-between', 
-                        alignItems: 'center',
-                        marginBottom: '0.5rem',
-                        padding: '0.5rem',
-                        background: 'rgba(255,255,255,0.5)',
-                        borderRadius: '4px'
-                    }
-                },
-                    React.createElement('span', { style: { fontWeight: '500' }}, 
-                        extractorProgress.current_calendar || 'Processing...'
-                    ),
-                    extractorProgress.events_extracted > 0 && React.createElement('span', { 
-                        style: { 
-                            background: '#28a745', 
-                            color: 'white', 
-                            padding: '0.25rem 0.5rem', 
-                            borderRadius: '12px',
-                            fontSize: '0.85rem',
-                            fontWeight: 'bold'
-                        }
-                    }, `${extractorProgress.events_extracted} events`),
-                    // Prefer runner-provided import_progress if present, otherwise fall back to filesystem-derived counters
-                    extractorProgress && extractorProgress.import_progress ? React.createElement('span', { style: { marginLeft: '0.75rem', color: '#333', fontSize: '0.9rem' }},
-                        `${extractorProgress.import_progress.succeeded || 0} succeeded, ${extractorProgress.import_progress.failed || 0} failed — ${extractorProgress.import_progress.files_count || extractorProgress.fs_events_count || 0}/${extractorProgress.import_progress.total_calendars || extractorProgress.import_progress.total || 0} files written`
-                    ) : (
-                    (extractorProgress.fs_events_count !== undefined) && React.createElement('span', {
-                        style: { marginLeft: '0.75rem', color: '#333', fontSize: '0.9rem' }
-                    }, `${extractorProgress.fs_events_count} files written`)
-                    ),
-                    (extractorProgress.fs_events_nonzero !== undefined) && React.createElement('span', {
-                        style: { marginLeft: '0.5rem', color: '#666', fontSize: '0.85rem' }
-                    }, `${extractorProgress.fs_events_nonzero} non-empty`)
-                ),
-                extractorRunning && React.createElement('div', { 
-                    style: { 
-                        height: '4px', 
-                        background: '#e0e0e0', 
-                        borderRadius: '2px', 
-                        overflow: 'hidden',
-                        marginBottom: '0.5rem'
-                    }
-                },
-                    React.createElement('div', { 
-                        style: { 
-                            height: '100%', 
-                            background: '#ffc107', 
-                            width: '30%',
-                            animation: 'pulse 1.5s infinite',
-                            borderRadius: '2px'
-                        }
-                    })
-                ),
-                // (Full extractor stdout removed from UI by admin request)
-            ),
-
+            React.createElement(ImportSummary, { progress: extractorProgress, running: extractorRunning,
+                calendars, retry: () => importCalendar(true) }),
             // Add Calendar Form
             React.createElement('div', { style: { background: 'white', padding: '1.5rem', borderRadius: '8px', marginBottom: '2rem', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }},
                 React.createElement('h2', { style: { marginBottom: '1rem', color: '#003366' }}, 'Add Calendar'),
@@ -484,14 +425,14 @@ const displayCalendarName = (name) => {
                         onChange: (e) => setNewCalendar({...newCalendar, color: e.target.value}),
                         style: { width: '50px', padding: '0.25rem', border: '1px solid #ddd', borderRadius: '4px' }
                     }),
-                    React.createElement('button', { 
+                    React.createElement('button', {
                         type: 'submit',
                         style: { padding: '0.5rem 1rem', background: '#003366', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
                     }, 'Add'),
-                    React.createElement('button', { 
+                    React.createElement('button', {
                         type: 'button',
                         onClick: importCalendar,
-                        disabled: importing,
+                        disabled: importing || extractorRunning,
                         style: { padding: '0.5rem 1rem', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
                     }, importing ? 'Importing...' : 'Import All')
                 )
@@ -509,21 +450,31 @@ const displayCalendarName = (name) => {
             // Calendars List
             React.createElement('div', { style: { background: 'white', padding: '1.5rem', borderRadius: '8px', marginBottom: '2rem', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }},
                 React.createElement('h2', { style: { marginBottom: '1rem', color: '#003366' }}, 'Configured Calendars'),
-                calendars.length === 0 
+                React.createElement('div', { className: 'calendar-controls' },
+                    React.createElement('input', { 'aria-label': 'Search calendars', placeholder: 'Search room, building or calendar…', value: query,
+                        onChange: e => { setQuery(e.target.value); setPage(0) } }),
+                    React.createElement('select', { 'aria-label': 'Filter import status', value: statusFilter,
+                        onChange: e => { setStatusFilter(e.target.value); setPage(0) } },
+                        ['all', 'success', 'failed', 'unknown'].map(v => React.createElement('option', {key:v, value:v}, v))),
+                    React.createElement('span', null, `${matching.length} calendars · Page ${currentPage + 1}/${pageCount}`),
+                    React.createElement('button', { disabled: currentPage === 0, onClick: () => setPage(currentPage - 1) }, 'Previous'),
+                    React.createElement('button', { disabled: currentPage + 1 >= pageCount, onClick: () => setPage(currentPage + 1) }, 'Next')
+                ),
+                matching.length === 0
                     ? React.createElement('p', { style: { color: '#666' }}, 'No calendars configured yet.')
                     : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.5rem' }},
-                        calendars.map((cal) => 
+                        visibleCalendars.map((cal) =>
                             editingCalendar && editingCalendar.id === cal.id
                                 // Edit mode
-                                ? React.createElement('form', { 
+                                ? React.createElement('form', {
                                     key: cal.id,
                                     onSubmit: updateCalendar,
-                                    style: { 
-                                        display: 'flex', 
-                                        alignItems: 'center', 
-                                        gap: '0.5rem', 
-                                        padding: '0.75rem', 
-                                        background: '#e3f2fd', 
+                                    style: {
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '0.5rem',
+                                        padding: '0.75rem',
+                                        background: '#e3f2fd',
                                         borderRadius: '4px',
                                         borderLeft: `4px solid ${editingCalendar.color || '#003366'}`,
                                         flexWrap: 'wrap'
@@ -561,22 +512,28 @@ const displayCalendarName = (name) => {
                                     }, 'Cancel')
                                 )
                                 // View mode
-                                : React.createElement('div', { 
+                                : React.createElement('div', {
                                     key: cal.id,
-                                    style: { 
-                                        display: 'flex', 
-                                        alignItems: 'center', 
-                                        gap: '1rem', 
-                                        padding: '0.75rem', 
-                                        background: cal.enabled === 0 ? '#f0f0f0' : '#f8f9fa', 
+                                    className: 'calendar-entry',
+                                    style: {
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: '1rem',
+                                        padding: '0.75rem',
+                                        background: cal.enabled === 0 ? '#f0f0f0' : '#f8f9fa',
                                         borderRadius: '4px',
                                         borderLeft: `4px solid ${cal.color || '#003366'}`,
                                         opacity: cal.enabled === 0 ? 0.6 : 1
                                     }
                                 },
-                                        React.createElement('span', { style: { flex: 1, fontWeight: '500' }}, displayCalendarName(cal.name || cal.email_address || cal.upn) || 'Unnamed'),
-                                        React.createElement('span', { style: { color: '#444', fontSize: '0.85rem', marginRight: '0.75rem' }}, cal.email_address || cal.upn ? 'UTCN room calendar' : ''),
-                                    React.createElement('span', { style: { color: '#666', fontSize: '0.85rem', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}, cal.url ? 'Published calendar URL' : ''),
+                                    React.createElement('div', { className: 'calendar-entry-info' },
+                                        React.createElement('strong', null, cal.name || 'Unnamed'),
+                                        React.createElement(CalendarImportStatus, { value: cal.import_status }),
+                                        React.createElement('div', {className: 'calendar-links'},
+                                            cal.html_url_link && React.createElement('a', {href:cal.html_url_link, target:'_blank', rel:'noopener noreferrer'}, 'Open HTML'),
+                                            cal.url_link && React.createElement('a', {href:cal.url_link, target:'_blank', rel:'noopener noreferrer'}, 'Open ICS')
+                                        )
+                                    ),
                                     cal.enabled === 0 && React.createElement('span', { style: { fontSize: '0.75rem', color: '#999', fontStyle: 'italic' }}, 'disabled'),
                                     React.createElement('button', {
                                         onClick: () => setEditingCalendar({...cal}),
