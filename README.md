@@ -605,3 +605,26 @@ Areas where contributions are especially useful:
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
+
+### Calendar diagnostics and personal timetable
+
+The admin panel records each calendar's latest check, last successful import,
+event count and a URL-redacted failure reason. Search/filter the list and use
+**Retry failed calendars** to refresh only enabled calendars whose latest result
+failed. Import progress counts the current run; stored snapshots are shown
+separately. Per-calendar status starts populating on the next import after upgrade.
+
+On the timetable, use the star beside a calendar to save it as a favorite in
+this browser, and **Show favorite rooms** to select saved favorites. Calendar
+selections also survive reloads. **Share this timetable** produces a link with
+filters, an absolute week and calendar selection; the selection lives in the URL
+fragment to avoid server request-line limits. Click or keyboard-activate an event
+for full details and its source's last successful import.
+
+**Find available rooms** checks an explicit interval or the next hour. A room is
+only classified as free when all its enabled calendar sources have a successful
+import within two hours, verified coverage of the requested dates and no
+overlapping events. Failed, unchecked, stale and partial browser-only imports
+have unknown availability. Rooms without building/room metadata are excluded.
+Availability is unavailable while a full import is running or the schedule cannot
+be read. Results describe published calendars and do not reserve rooms.

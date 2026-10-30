@@ -11,3 +11,12 @@ button:disabled { opacity: .55; cursor: default; }
 .calendar-links { display: flex; gap: 12px; margin-top: 8px; }
 .calendar-entry { flex-wrap: wrap; }
 .calendar-entry-info { flex: 1 1 280px; min-width: 0; }
+
+@media (max-width: 760px) {
+  .calendar-entry-info { flex: initial; width: 100%; }
+  .admin-container > div[style*="background: rgb(248, 249, 250)"],
+  .admin-container > div[style*="background: #f8f9fa"] { flex-wrap: wrap; }
+  .admin-container input[type="file"] { width: 100%; min-width: 0; }
+  .admin-container #upload-csv-input-global { max-width: 100%; }
+  .admin-container div:has(> #upload-csv-input-global) { flex-wrap: wrap; min-width: 0; width: 100%; }
+}

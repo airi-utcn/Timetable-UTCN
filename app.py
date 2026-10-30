@@ -1263,7 +1263,19 @@ def _run_extractor_for_url(url: str, calendar_name: str = None, html_url: str = 
         validate_calendar_url(html_url)
     h = hashlib.sha1(url.encode('utf-8')).hexdigest()[:8]
     with file_lock(pathlib.Path('playwright_captures') / f'.calendar_{h}.lock'):
-        return _extract_calendar_url(url, calendar_name, html_url)
+        from tools.import_status import record_result
+        output = pathlib.Path('playwright_captures') / f'events_{h}.json'
+        before = output.stat().st_mtime_ns if output.exists() else None
+        try:
+            result = _extract_calendar_url(url, calendar_name, html_url)
+            updated = output.exists() and output.stat().st_mtime_ns != before
+            data = json.loads(output.read_text()) if updated else None
+            success = result == 0 and isinstance(data, list)
+            record_result(output.parent, {'url': url}, success, len(data) if success else None)
+            return result
+        except Exception:
+            record_result(output.parent, {'url': url}, False)
+            raise
 
 
 def _extract_calendar_url(url: str, calendar_name: str = None, html_url: str = None) -> int:
@@ -2032,6 +2044,8 @@ def calendars_json():
         init_db()
         calendars = list_calendar_urls()
         result = {}
+        from tools.import_status import read_status
+        statuses = read_status()
         for cal in calendars:
             url = cal.get('url', '')
             # Calculate hash the same way as in _run_extractor_for_url (SHA1, not MD5)
@@ -2041,7 +2055,9 @@ def calendars_json():
                 'color': cal.get('color'),
                 'building': cal.get('building') or None,
                 'room': cal.get('room') or None,
-                'enabled': cal.get('enabled')
+                'enabled': cal.get('enabled'),
+                'freshness': {k: v for k, v in statuses.get(url_hash, {}).items()
+                              if k in ('status', 'checked_at', 'last_success', 'window')}
             }
         return jsonify(result)
     except Exception:
@@ -2319,6 +2335,33 @@ def events_json():
             not room_filter or room_filter in str(ev.get('room') or '').lower()) and (
             not group_filter or group_filter in str(ev.get('group') or '').lower())
     return jsonify([ev for ev in events if matches(ev)])
+
+
+@app.route('/availability-data.json')
+def availability_data():
+    from tools.storage import file_lock
+    with file_lock(pathlib.Path('playwright_captures/.full_extraction.lock'), blocking=False) as available:
+        if not available:
+            return jsonify({'error': 'Import in progress; availability is not yet verified.'}), 503
+        return _availability_data()
+
+
+def _availability_data():
+    """Availability must fail closed when the schedule cannot be read."""
+    try:
+        start = date.fromisoformat(request.args.get('from', ''))
+        end = date.fromisoformat(request.args.get('to', ''))
+        if end < start or (end - start).days > 7:
+            raise ValueError()
+    except ValueError:
+        return jsonify({'error': 'Choose a valid interval of at most seven days.'}), 400
+    try:
+        path, _ = ensure_schedule(start, end)
+        if not path or not isinstance(_read_json_cached(str(path)), dict):
+            raise ValueError('No complete schedule available')
+    except Exception:
+        return jsonify({'error': 'Schedule unavailable; room availability is unknown.'}), 503
+    return jsonify({'events': events_json().get_json(), 'calendars': calendars_json().get_json()})
 
 
 @app.route('/export_room')
@@ -3025,7 +3068,7 @@ def admin_api_status():
     # precise per-calendar progress (total / succeeded / failed / files_count)
     import_progress = None
     try:
-        prog_path = pathlib.Path(__file__).parent / 'playwright_captures' / 'import_progress.json'
+        prog_path = pathlib.Path('playwright_captures/import_progress.json')
         if prog_path.exists():
             try:
                 with open(prog_path, 'r', encoding='utf-8') as pf:

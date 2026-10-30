@@ -29,7 +29,7 @@ def error_summary(error):
     return ' — '.join(parts)
 
 
-def record_result(directory, calendar, success, count=None, error=None):
+def record_result(directory, calendar, success, count=None, error=None, window=None):
     now = datetime.now(timezone.utc).isoformat()
     key = source_key(calendar['url'])
     def update(current):
@@ -39,6 +39,7 @@ def record_result(directory, calendar, success, count=None, error=None):
             'checked_at': now,
             'last_success': now if success else previous.get('last_success'),
             'event_count': count if success else previous.get('event_count'),
+            'window': window if success else previous.get('window'),
             'error': None if success else error or 'Import failed; previous data retained.',
         }
         return current

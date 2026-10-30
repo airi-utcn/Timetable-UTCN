@@ -31,15 +31,16 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import hashlib
-from tools.import_status import read_status, record_result, source_key, error_summary
 
 # ensure project root is on path when run as a script from different CWDs
 proj_root = pathlib.Path(__file__).parent.parent
 if str(proj_root) not in sys.path:
     sys.path.insert(0, str(proj_root))
+
+from tools.import_status import read_status, record_result, source_key, error_summary
 
 try:
     from tools.ics_fetch import fetch_ics_events, FetchError
@@ -200,7 +201,7 @@ def _main(failed_only=False):
                 success, n_events = False, None
             with progress_lock:
                 if success:
-                    record_result(OUT_DIR, cal, True, n_events)
+                    record_result(OUT_DIR, cal, True, n_events, window={'from': from_d.isoformat(), 'to': to_d.isoformat()})
                     ok += 1
                     if n_events == 0:
                         zero_event_rooms.append(cal.get('name') or cal['url'])
@@ -288,6 +289,7 @@ def _main(failed_only=False):
                     success, n_events = False, None
                 with progress_lock:
                     if success:
+                        # Browser captures do not prove complete coverage of the ICS window.
                         record_result(OUT_DIR, cal, True, n_events)
                         ok += 1
                         if n_events == 0:
@@ -315,7 +317,7 @@ def _main(failed_only=False):
     print('─' * 60)
 
     report = {
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'timestamp': datetime.now(timezone.utc).isoformat(),
         'window': {'from': from_d.isoformat(), 'to': to_d.isoformat()},
         'discovered': total,
         'succeeded': ok,
@@ -367,7 +369,7 @@ def _main(failed_only=False):
                 prog = {}
             prog['files_count'] = files_count
             prog['finished'] = True
-            prog['finished_at'] = datetime.utcnow().isoformat() + 'Z'
+            prog['finished_at'] = datetime.now(timezone.utc).isoformat()
             atomic_write_json(progress_path, prog)
 
             with open(tmp, 'w', encoding='utf-8') as mf:

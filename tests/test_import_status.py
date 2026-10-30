@@ -1,6 +1,13 @@
+import pytest
 from types import SimpleNamespace
 import json
 from tools.import_status import record_result, read_status, source_key, error_summary
+
+
+@pytest.fixture
+def client():
+    import app
+    return app.app.test_client()
 
 
 def test_failure_retains_last_success_and_event_count(tmp_path):
@@ -51,3 +58,31 @@ def test_retry_import_only_touches_failed_calendars(tmp_path, monkeypatch):
     assert progress['succeeded'] == 1
     assert progress['zero_events'] == 1
     assert progress['finished'] is True
+
+
+def test_public_calendar_status_never_exposes_errors_or_tokens(client, monkeypatch, tmp_path):
+    import app
+    monkeypatch.chdir(tmp_path)
+    cal = {'url': 'https://outlook.office365.com/private-token', 'name': 'room', 'enabled': 1}
+    monkeypatch.setattr(app, 'list_calendar_urls', lambda: [cal])
+    record_result('playwright_captures', cal, False, error='private diagnostic')
+    response = client.get('/calendars.json')
+    result = response.get_json()[source_key(cal['url'])]
+    assert result['freshness']['status'] == 'failed'
+    assert 'private-token' not in response.text
+    assert 'private diagnostic' not in response.text
+
+
+def test_availability_fails_closed_without_schedule(client, monkeypatch):
+    import app
+    monkeypatch.setattr(app, 'ensure_schedule', lambda *a: (None, None))
+    assert client.get('/availability-data.json?from=2026-10-30&to=2026-10-30').status_code == 503
+    assert client.get('/availability-data.json?from=2026-10-30&to=2026-09-30').status_code == 400
+
+
+def test_availability_is_unknown_while_an_import_is_running(client, monkeypatch, tmp_path):
+    from tools.storage import file_lock
+    monkeypatch.chdir(tmp_path)
+    with file_lock('playwright_captures/.full_extraction.lock'):
+        response = client.get('/availability-data.json?from=2026-10-30&to=2026-10-30')
+    assert response.status_code == 503

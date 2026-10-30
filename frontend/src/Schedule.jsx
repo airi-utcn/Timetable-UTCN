@@ -1,3 +1,6 @@
+import EventDetails from './EventDetails'
+import RoomAvailability from './RoomAvailability'
+import {initialSchedule, scheduleLink, loadLocal, saveLocal, freshness} from './schedule-preferences'
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   formatHM, localDateStr, addLocalDays, eventStatus, activityType, TYPE_LABELS,
@@ -11,13 +14,16 @@ const CALENDAR_COLORS = [
 
 // Module-scope row component — defining it inside Schedule would remount
 // (and re-animate) every row on each state change, causing visible flicker.
-const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars }) {
+const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars, onDetails }) {
   const st = eventStatus(ev, now)
   const statusText = st.text || ({ ongoing: 'In progress', next: 'Starting soon', upcoming: 'Scheduled', finished: 'Finished' }[st.key] || 'Scheduled')
   const pct = progressPct(ev, now)
   const type = activityType(ev)
   return (
     <div
+      role="button" tabIndex={0} aria-label={`Details: ${ev.display_title || ev.title}`}
+      onClick={() => onDetails(ev)}
+      onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onDetails(ev) } }}
       className={'evt-row' + (st.key === 'ongoing' ? ' is-ongoing' : '') + (st.key === 'finished' ? ' is-finished' : '')}
       style={{ '--row-accent': ev.color || 'var(--accent)' }}
     >
@@ -27,6 +33,7 @@ const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars }) {
       </div>
       <div className="evt-main">
         <span className="evt-title">{ev.display_title || ev.title}</span>
+        <small className={'data-state ' + freshness(calendars[ev.source], now).key}>{freshness(calendars[ev.source], now).text}</small>
         <span className="evt-sub">
           {type && <span className={typeChipClass(type)}>{TYPE_LABELS[type]}</span>}
           {ev.subject && ev.subject !== (ev.display_title || ev.title) && (
@@ -44,21 +51,30 @@ const ScheduleRow = React.memo(function ScheduleRow({ ev, now, calendars }) {
 })
 
 export default function Schedule() {
+  const initial = useRef(initialSchedule()).current
+  const [detailEvent, setDetailEvent] = useState(null)
+  const [shareUrl, setShareUrl] = useState('')
+  const [favorites, setFavorites] = useState(() => {
+    const stored = loadLocal('utcn-favorite-calendars', [])
+    return Array.isArray(stored) ? stored.filter(v => typeof v === 'string') : []
+  })
+  const selectionLoaded = useRef(false)
+
   const [events, setEvents] = useState([])
   const [allEvents, setAllEvents] = useState([])      // 2-month window cache
   const [calendars, setCalendars] = useState({})
   const [enabledCalendars, setEnabledCalendars] = useState({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
-  const [filters, setFilters] = useState({ subject: '', professor: '', room: '', group: '' })
-  const [searchQuery, setSearchQuery] = useState('')
+  const [filters, setFilters] = useState(initial.filters)
+  const [searchQuery, setSearchQuery] = useState(initial.search)
   const [searchSuggestions, setSearchSuggestions] = useState([])
   const [showSuggestions, setShowSuggestions] = useState(false)
   const [calendarSearch, setCalendarSearch] = useState('')
   const [lastUpdate, setLastUpdate] = useState(null)
-  const [viewMode, setViewMode] = useState('week')
+  const [viewMode, setViewMode] = useState(initial.view)
   const [nearestDay, setNearestDay] = useState(null)
-  const [weekOffset, setWeekOffset] = useState(0)
+  const [weekOffset, setWeekOffset] = useState(initial.offset)
   const [now, setNow] = useState(new Date())
   const abortRef = useRef(null)
   const allEventsCacheRef = useRef(null)
@@ -99,6 +115,7 @@ export default function Schedule() {
         const enabled = {}
         Object.entries(data).forEach(([hash, info]) => {
           calMap[hash] = {
+            ...info,
             color: info.color || CALENDAR_COLORS[Object.keys(calMap).length % CALENDAR_COLORS.length],
             name: info.name || hash,
             room: info.room || '',
@@ -108,7 +125,14 @@ export default function Schedule() {
         setCalendars(calMap)
         setEnabledCalendars(prev => {
           const merged = { ...enabled }
-          Object.keys(prev).forEach(k => { if (k in merged) merged[k] = prev[k] })
+          if (!selectionLoaded.current) {
+            const saved = loadLocal('utcn-calendar-selection', {})
+            Object.keys(merged).forEach(k => {
+              if (initial.selected !== null) merged[k] = initial.selected.includes(k)
+              else if (saved && typeof saved[k] === 'boolean') merged[k] = saved[k]
+            })
+            selectionLoaded.current = true
+          } else Object.keys(prev).forEach(k => { if (k in merged) merged[k] = prev[k] })
           return merged
         })
       }
@@ -117,7 +141,15 @@ export default function Schedule() {
     }
   }, [])
 
-  useEffect(() => { fetchCalendarList() }, [fetchCalendarList])
+  useEffect(() => {
+    fetchCalendarList()
+    const poll = setInterval(fetchCalendarList, 15 * 60000)
+    return () => clearInterval(poll)
+  }, [fetchCalendarList])
+  useEffect(() => {
+    if (selectionLoaded.current) saveLocal('utcn-calendar-selection', enabledCalendars)
+  }, [enabledCalendars])
+  useEffect(() => { saveLocal('utcn-favorite-calendars', favorites) }, [favorites])
 
   const findNearestDayWithEvents = useCallback((allEvts) => {
     if (!allEvts || allEvts.length === 0) return null
@@ -362,6 +394,23 @@ export default function Schedule() {
         </div>
       )}
 
+      <div className="schedule-tools">
+        <button className="btn ghost" onClick={() => {
+          const url = scheduleLink({filters, search:searchQuery, view:viewMode, offset:weekOffset,
+            selected:Object.keys(enabledCalendars).filter(k => enabledCalendars[k])})
+          setShareUrl(url)
+          navigator.clipboard?.writeText(url).catch(() => {})
+        }}>Share this timetable</button>
+        <button className="btn ghost" disabled={!favorites.length} onClick={() => {
+          setEnabledCalendars(Object.fromEntries(Object.keys(calendars).map(k => [k, favorites.includes(k)])))
+        }}>Show favorite rooms ({favorites.length})</button>
+        {shareUrl && <label>Share link<input aria-label="Share timetable link" value={shareUrl} readOnly onFocus={e => e.target.select()} /></label>}
+      </div>
+      <RoomAvailability />
+      {Object.values(calendars).some(c => c.enabled !== 0 && freshness(c, now).key !== 'fresh') &&
+        <p className="data-state stale" role="status">Some calendars have unverified or outdated data. Open an event for its source and last successful import.</p>}
+      {detailEvent && <EventDetails event={detailEvent} calendars={calendars} onClose={() => setDetailEvent(null)} />}
+
       <div className="filters panel" aria-label="Schedule filters">
         <div className="field" style={{ flex: '2 1 220px' }}>
           <label htmlFor="schedule-search">Search</label>
@@ -437,7 +486,7 @@ export default function Schedule() {
             {Object.entries(calendars)
               .filter(([, cal]) => !calendarSearch || `${displayCalendarName(cal.name)} ${cal.name}`.toLowerCase().includes(calendarSearch.toLowerCase()))
               .map(([source, cal]) => (
-                <label key={source} className="legend-item" title={displayCalendarName(cal.name)}>
+                <div className="calendar-choice" key={source}><label className="legend-item" title={displayCalendarName(cal.name)}>
                   <input
                     type="checkbox"
                     checked={enabledCalendars[source] !== false}
@@ -446,6 +495,10 @@ export default function Schedule() {
                   <span className="legend-dot" style={{ backgroundColor: cal.color }}></span>
                   <span>{displayCalendarName(cal.name)}</span>
                 </label>
+                <button type="button" className="favorite-star" aria-pressed={favorites.includes(source)}
+                  aria-label={`Favorite ${cal.name}`} onClick={() => setFavorites(prev => prev.includes(source) ? prev.filter(k => k !== source) : [...prev,source])}>
+                  {favorites.includes(source) ? '★' : '☆'}
+                </button></div>
               ))}
           </div>
           <div className="actions">
@@ -501,7 +554,7 @@ export default function Schedule() {
             </div>
             {groupedByDate[date].map((ev, idx) => (
               <ScheduleRow key={(ev.start || '') + (ev.room || '') + idx}
-                ev={ev} now={now} calendars={calendars} />
+                ev={ev} now={now} calendars={calendars} onDetails={setDetailEvent} />
             ))}
           </div>
         </section>
@@ -509,7 +562,7 @@ export default function Schedule() {
 
       {lastUpdate && (
         <div className="status-bar">
-          <span>Last update: {lastUpdate.toLocaleTimeString('en-GB')}</span>
+          <span>View refreshed: {lastUpdate.toLocaleTimeString('en-GB')}</span>
           <span>•</span>
           <span>{filteredEvents.length} classes shown</span>
         </div>
