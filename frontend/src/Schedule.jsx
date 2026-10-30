@@ -407,8 +407,6 @@ export default function Schedule() {
         {shareUrl && <label>Share link<input aria-label="Share timetable link" value={shareUrl} readOnly onFocus={e => e.target.select()} /></label>}
       </div>
       <RoomAvailability />
-      {Object.values(calendars).some(c => c.enabled !== 0 && freshness(c, now).key !== 'fresh') &&
-        <p className="data-state stale" role="status">Some calendars have unverified or outdated data. Open an event for its source and last successful import.</p>}
       {detailEvent && <EventDetails event={detailEvent} calendars={calendars} onClose={() => setDetailEvent(null)} />}
 
       <div className="filters panel" aria-label="Schedule filters">
