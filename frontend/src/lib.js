@@ -89,7 +89,7 @@ export function normalizeBuilding(raw, loc) {
 // ── Time / status helpers ────────────────────────────────────────────
 
 export function formatHM(iso) {
-  if (!iso) return '--:--'
+  if (!iso || !Number.isFinite(+new Date(iso))) return '--:--'
   try {
     return new Date(iso).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
   } catch (e) { return '--:--' }
@@ -122,7 +122,8 @@ export function eventStatus(ev, now = new Date()) {
   if (!ev || !ev.start) return { key: 'upcoming', text: '' }
   try {
     const s = new Date(ev.start)
-    const e = ev.end ? new Date(ev.end) : null
+    const e = ev.end && Number.isFinite(+new Date(ev.end)) ? new Date(ev.end) : null
+    if (!Number.isFinite(+s)) return { key: 'upcoming', text: 'Time unknown' }
     if (e && now >= e) return { key: 'finished', text: 'Finished' }
     if (now >= s) {
       if (e) {
@@ -130,7 +131,7 @@ export function eventStatus(ev, now = new Date()) {
         const txt = left >= 60 ? `${Math.floor(left / 60)}h ${left % 60}m left` : `${left} min left`
         return { key: 'ongoing', text: txt }
       }
-      return { key: 'ongoing', text: 'In progress' }
+      return { key: 'upcoming', text: 'End time unknown' }
     }
     const mins = Math.floor((s - now) / 60000)
     if (mins <= 30) return { key: 'next', text: mins <= 1 ? 'Starting now' : `in ${mins} min` }

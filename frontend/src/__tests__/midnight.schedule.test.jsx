@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, waitFor } from '@testing-library/react'
+import { render, waitFor, fireEvent } from '@testing-library/react'
 import Schedule from '../Schedule'
 import { vi, beforeEach, afterEach, describe, it, expect } from 'vitest'
 
@@ -32,7 +32,7 @@ describe('Schedule midnight behavior', () => {
     const initialCalls = global.fetch.mock.calls.length
 
     // Dispatch midnight
-    window.dispatchEvent(new Event('midnight'))
+    fireEvent(window, new Event('midnight'))
 
     // Wait for a subsequent fetch call
     await waitFor(() => {

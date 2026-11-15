@@ -1,3 +1,4 @@
+import logoLight from './assets/utcn-logo-light.svg'
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   CANONICAL_BUILDINGS, buildingLabel, normalizeBuilding,
@@ -212,7 +213,7 @@ export default function TvBoard({ onExit }) {
 
       <header className="tv-header">
         <div className="tv-brand">
-          <div className="brand-mark" aria-hidden="true">UT</div>
+          <img className="tv-logo" src={logoLight} alt="UTCN" width="86" height="55" />
           <div>
             <h1>UTCN Timetable</h1>
             <div className="sub">Technical University of Cluj-Napoca</div>
