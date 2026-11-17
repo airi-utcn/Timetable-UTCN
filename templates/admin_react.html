@@ -11,12 +11,9 @@
 </head>
 <body class="admin-page">
     <header class="admin-header">
-        <div class="admin-brand"><img src="{{ url_for('static', filename='images/utcn-logo-color.svg') }}" width="86" height="55" alt="UTCN"><div><h1 class="product-name">Timetable</h1><span class="institution-name">Technical University of Cluj-Napoca</span></div><span class="admin-label">Administration</span></div>
-        <a href="/" class="back-link">← Back to Schedule</a>
+        <div class="admin-brand"><img src="{{ url_for('static', filename='images/utcn-logo-color.svg') }}" width="86" height="55" alt="UTCN"><div><span class="product-name">Timetable</span><span class="institution-name">Technical University of Cluj-Napoca</span></div><span class="admin-label">Administration</span></div>
+        <a href="/" class="back-link">← Back to Timetable</a>
     </header>
-    <div class="admin-notice">
-        You are logged in as administrator. All changes will be saved immediately.
-    </div>
     <main id="admin-root"></main>
     
     {% if admin_asset %}
