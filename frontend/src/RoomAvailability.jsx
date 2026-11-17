@@ -50,9 +50,18 @@ export default function RoomAvailability({ favorites = [] }) {
         throw new Error('Availability unavailable. Please try again later.')
       const data = await res.json()
       if (
+        !data ||
         !Array.isArray(data.events) ||
+        !data.events.every(
+          (event) => event && typeof event === 'object' && !Array.isArray(event)
+        ) ||
         !data.calendars ||
-        typeof data.calendars !== 'object'
+        typeof data.calendars !== 'object' ||
+        Array.isArray(data.calendars) ||
+        !Object.values(data.calendars).every(
+          (calendar) =>
+            calendar && typeof calendar === 'object' && !Array.isArray(calendar)
+        )
       )
         throw new Error('Incomplete availability data.')
       if (!ctrl.signal.aborted)
@@ -177,7 +186,11 @@ export default function RoomAvailability({ favorites = [] }) {
               {results.filter((r) => r.status === 'unknown').length} unknown
             </span>
           </div>
-          <ul className="room-results">
+          <ul
+            className="room-results"
+            tabIndex={0}
+            aria-label="Room availability results"
+          >
             {visible.map((r) => (
               <li key={r.key}>
                 <span className="room-result-name">
