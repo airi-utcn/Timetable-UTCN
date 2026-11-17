@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, waitFor } from '@testing-library/react'
+import { render, waitFor, fireEvent } from '@testing-library/react'
 import Schedule from '../Schedule'
 import { vi, beforeEach, afterEach, describe, it, expect } from 'vitest'
 
@@ -54,7 +54,7 @@ describe('Scoped fetch behavior', () => {
     expect(matched).toBe(true)
   })
 
-  it('on midnight dispatch fetches twoMonthsAll', async () => {
+  it('on midnight refreshes the selected period and its two-month lookahead', async () => {
     render(<Schedule />)
 
     await waitFor(() => {
@@ -64,11 +64,14 @@ describe('Scoped fetch behavior', () => {
     const initialCount = global.fetch.mock.calls.length
 
     // Dispatch midnight event
-    window.dispatchEvent(new Event('midnight'))
+    fireEvent(window, new Event('midnight'))
 
     await waitFor(() => {
       expect(global.fetch.mock.calls.length).toBeGreaterThan(initialCount)
     })
+
+    // Wait for both the visible-period request and lookahead refresh.
+    await waitFor(() => expect(global.fetch.mock.calls.slice(initialCount).filter(([u]) => String(u).includes('/events.json?')).length).toBeGreaterThanOrEqual(2))
 
     // find the most recent events.json call
     const calls = global.fetch.mock.calls.slice()

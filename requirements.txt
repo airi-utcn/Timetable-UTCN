@@ -1,5 +1,7 @@
 requests>=2.34.2,<3
 beautifulsoup4>=4.15,<5
+# Security fix for polynomial-time descendant-selector matching (GHSA-mmhr-3c5m-f64f).
+soupsieve>=4.0,<5
 ics>=0.7.3,<0.8
 # ics 0.7.x requires tatsu <5.9; newer releases break import with ParserConfig buffer_class
 tatsu>=5.8,<5.9

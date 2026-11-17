@@ -1,5 +1,5 @@
 import React from 'react'
-import { render, waitFor } from '@testing-library/react'
+import { render, waitFor, fireEvent } from '@testing-library/react'
 import Departures from '../Departures'
 import { vi, beforeEach, afterEach, describe, it, expect } from 'vitest'
 
@@ -28,7 +28,7 @@ describe('Departures midnight behavior', () => {
 
     const initial = global.fetch.mock.calls.length
 
-    window.dispatchEvent(new Event('midnight'))
+    fireEvent(window, new Event('midnight'))
 
     await waitFor(() => {
       expect(global.fetch.mock.calls.length).toBeGreaterThan(initial)

@@ -240,7 +240,7 @@ The Vite dev server proxies these endpoints to Flask during frontend development
 
 ### For Local Development
 
-- Python 3.11 or newer
+- Python 3.11.5 or newer (Python 3.12 matches CI and the production image)
 - Node.js 22.12 or newer (or Node.js 20.19+)
 - npm
 - Playwright browser dependencies, if running HTML calendar extraction locally

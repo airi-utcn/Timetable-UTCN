@@ -9,6 +9,7 @@ export default defineConfig({
   test: { environment: 'jsdom', globals: true },
   server: {
     proxy: {
+      '/availability-data.json': backendTarget,
       '/events.json': backendTarget,
       '/departures.json': backendTarget,
       '/calendars.json': backendTarget,

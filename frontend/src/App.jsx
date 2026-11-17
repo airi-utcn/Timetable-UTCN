@@ -1,4 +1,7 @@
 import React, { useState, useEffect } from 'react'
+import Icon from './Icon'
+import logoColor from './assets/utcn-logo-color.svg'
+import logoLight from './assets/utcn-logo-light.svg'
 import Schedule from './Schedule'
 import Departures from './Departures'
 import TvBoard from './TvBoard'
@@ -7,7 +10,9 @@ function readTvParam() {
   try {
     const qs = new URLSearchParams(window.location.search)
     return qs.get('tv') === '1' || window.location.hash === '#tv'
-  } catch (e) { return false }
+  } catch (e) {
+    return false
+  }
 }
 
 const HeaderClock = React.memo(function HeaderClock() {
@@ -18,12 +23,18 @@ const HeaderClock = React.memo(function HeaderClock() {
     return () => clearInterval(timer)
   }, [])
 
-  const formatDate = (date) => date.toLocaleDateString('en-GB', {
-    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
-  })
-  const formatTime = (date) => date.toLocaleTimeString('en-GB', {
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-  })
+  const formatDate = (date) =>
+    date.toLocaleDateString('en-GB', {
+      weekday: 'long',
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric'
+    })
+  const formatTime = (date) =>
+    date.toLocaleTimeString('en-GB', {
+      hour: '2-digit',
+      minute: '2-digit'
+    })
 
   return (
     <div className="header-clock" aria-hidden="true">
@@ -38,14 +49,25 @@ export default function App() {
   const [tvMode, setTvMode] = useState(readTvParam)
   const [theme, setTheme] = useState(() => {
     try {
-      return window.localStorage.getItem('utcn-theme') === 'dark' ? 'dark' : 'light'
-    } catch (e) { return 'light' }
+      return window.localStorage.getItem('utcn-theme') === 'dark'
+        ? 'dark'
+        : 'light'
+    } catch (e) {
+      return 'light'
+    }
   })
 
   useEffect(() => {
     try {
-      if (window.location.pathname === '/frontend' || window.location.pathname === '/frontend/') {
-        window.history.replaceState({}, '', '/' + window.location.search + window.location.hash)
+      if (
+        window.location.pathname === '/frontend' ||
+        window.location.pathname === '/frontend/'
+      ) {
+        window.history.replaceState(
+          {},
+          '',
+          '/' + window.location.search + window.location.hash
+        )
       }
     } catch (e) {}
   }, [])
@@ -59,10 +81,15 @@ export default function App() {
       const nextMidnight = new Date(now)
       nextMidnight.setHours(24, 0, 0, 0)
       const msUntilMidnight = nextMidnight - now
-      const safeMs = msUntilMidnight > 0 && msUntilMidnight < 8.64e7 ? msUntilMidnight : 60000
+      const safeMs =
+        msUntilMidnight > 0 && msUntilMidnight < 8.64e7
+          ? msUntilMidnight
+          : 60000
 
       midnightTimer = setTimeout(() => {
-        try { window.dispatchEvent(new Event('midnight')) } catch (e) {}
+        try {
+          window.dispatchEvent(new Event('midnight'))
+        } catch (e) {}
         scheduleMidnight()
       }, safeMs)
     }
@@ -77,7 +104,9 @@ export default function App() {
     const root = document.documentElement
     if (theme === 'dark') root.setAttribute('data-theme', 'dark')
     else root.removeAttribute('data-theme')
-    try { window.localStorage.setItem('utcn-theme', theme) } catch (e) {}
+    try {
+      window.localStorage.setItem('utcn-theme', theme)
+    } catch (e) {}
   }, [theme])
 
   // keep TV mode in sync with the URL (back/forward navigation)
@@ -99,7 +128,8 @@ export default function App() {
     } catch (e) {}
     setTvMode(true)
     try {
-      if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen().catch(() => {})
+      if (document.documentElement.requestFullscreen)
+        document.documentElement.requestFullscreen().catch(() => {})
     } catch (e) {}
   }
 
@@ -110,7 +140,9 @@ export default function App() {
       window.history.pushState({}, '', url)
     } catch (e) {}
     setTvMode(false)
-    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}) } catch (e) {}
+    try {
+      if (document.fullscreenElement) document.exitFullscreen().catch(() => {})
+    } catch (e) {}
   }
 
   if (tvMode) {
@@ -118,13 +150,31 @@ export default function App() {
   }
 
   return (
-    <div className="app">
+    <div
+      className={'app ' + (tab === 'schedule' ? 'timetable-app' : 'live-app')}
+    >
+      <a href="#main-content" className="skip-link">
+        Skip to timetable
+      </a>
       <header className="header">
         <div className="header-content">
           <div className="brand">
-            <div className="brand-mark" aria-hidden="true">UT</div>
+            <a
+              className="institution-logo"
+              href="https://utcluj.ro/"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="Technical University of Cluj-Napoca — official website"
+            >
+              <img
+                src={theme === 'dark' ? logoLight : logoColor}
+                alt="UTCN"
+                width="86"
+                height="55"
+              />
+            </a>
             <div className="brand-text">
-              <h1>UTCN Timetable</h1>
+              <h1>Timetable</h1>
               <span className="sub">Technical University of Cluj-Napoca</span>
             </div>
           </div>
@@ -132,39 +182,49 @@ export default function App() {
             <button
               onClick={() => setTab('schedule')}
               className={'nav-btn ' + (tab === 'schedule' ? 'active' : '')}
+              aria-pressed={tab === 'schedule'}
             >
-              Schedule
+              <Icon name="calendar" size={16} /> Schedule
             </button>
             <button
               onClick={() => setTab('departures')}
               className={'nav-btn ' + (tab === 'departures' ? 'active' : '')}
+              aria-pressed={tab === 'departures'}
             >
-              Live
-            </button>
-            <button onClick={enterTv} className="nav-btn" title="Full-screen campus display mode">
-              ⤢ Display
+              <Icon name="clock" size={16} /> Live
             </button>
             <button
-              onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+              onClick={enterTv}
+              className="nav-btn"
+              title="Full-screen campus display mode"
+            >
+              <Icon name="display" size={16} /> <span>Display</span>
+            </button>
+            <button
+              onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
               className="nav-btn icon-btn"
               title={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
-              aria-label={theme === 'dark' ? 'Use light theme' : 'Use dark theme'}
+              aria-label={
+                theme === 'dark' ? 'Use light theme' : 'Use dark theme'
+              }
             >
-              {theme === 'dark' ? '☀' : '◐'}
+              <Icon name="moon" size={17} />
             </button>
           </nav>
           <HeaderClock />
         </div>
       </header>
 
-      <main className="main">
-        {tab === 'schedule' && <Schedule />}
+      <main className="main" id="main-content">
+        <div className="schedule-container" hidden={tab !== 'schedule'}>
+          <Schedule />
+        </div>
         {tab === 'departures' && <Departures />}
       </main>
 
       <footer className="footer">
         <p>© {new Date().getFullYear()} Technical University of Cluj-Napoca</p>
-        <p>UTCN timetable system • Auto-refresh enabled</p>
+        <p>Published campus schedules</p>
         <p>
           <a
             href="https://didatec-my.sharepoint.com/:b:/g/personal/norina_herki_campus_utcluj_ro/IQDRjcNWter3T5KD0Zd1XehiASHSf3nUyD4tArZ-O5VmfpE?e=KeJetN"
