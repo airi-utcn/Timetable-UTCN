@@ -1,5 +1,4 @@
 import ImportSummary, { CalendarImportStatus } from './ImportSummary'
-import './admin-improvements.css'
 import React from 'react'
     import ReactDOM from 'react-dom/client'
 
@@ -302,253 +301,402 @@ const displayCalendarName = (name) => {
         const visibleCalendars = matching.slice(currentPage * 25, (currentPage + 1) * 25)
 
         if (loading) {
-            return React.createElement('div', { className: 'admin-loading', style: { padding: '2rem', textAlign: 'center' } },
-                React.createElement('div', { className: 'spinner' }),
-                ' Loading...'
-            )
+          return React.createElement(
+            'div',
+            { className: 'admin-loading' },
+            React.createElement('div', { className: 'spinner' }),
+            ' Loading...'
+          )
         }
 
-        return React.createElement('div', { className: 'admin-container', style: { padding: '2rem', maxWidth: '1200px', margin: '0 auto' } },
-            // Message
-            message && (message.type === 'expired'
-                ? React.createElement('div', {
-                    className: 'admin-message expired',
-                    style: {
-                        padding: '1rem',
-                        marginBottom: '1rem',
-                        borderRadius: '8px',
-                        background: '#fff3cd',
-                        color: '#856404',
-                        display: 'flex',
-                        justifyContent: 'space-between',
-                        alignItems: 'center'
+        return React.createElement(
+          'div',
+          { className: 'admin-container' },
+          // Message
+          message &&
+            (message.type === 'expired'
+              ? React.createElement(
+                  'div',
+                  {
+                    className: 'admin-message expired'
+                  },
+                  React.createElement('span', null, message.text),
+                  React.createElement(
+                    'button',
+                    {
+                      onClick: () => {
+                        window.location = '/admin?expired=1'
+                      }
+                    },
+                    'Go to login'
+                  )
+                )
+              : React.createElement(
+                  'div',
+                  {
+                    className: `admin-message ${message.type}`
+                  },
+                  message.text
+                )),
+
+          // Warning banner when session is about to expire (shows before 'expired')
+          warningInfo &&
+            (!message || message.type !== 'expired') &&
+            React.createElement(
+              'div',
+              {
+                className: 'admin-message warning'
+              },
+              React.createElement(
+                'span',
+                null,
+                `Session will expire in ${warningInfo.secs} seconds.`
+              ),
+              React.createElement(
+                'div',
+                null,
+                React.createElement(
+                  'button',
+                  {
+                    onClick: extendSession
+                  },
+                  'Extend session'
+                ),
+                React.createElement(
+                  'button',
+                  {
+                    onClick: () => {
+                      window.location = '/admin?expired=1'
                     }
+                  },
+                  'Go to login'
+                )
+              )
+            ),
+
+          // Session indicator (minutes remaining)
+          React.createElement(
+            'div',
+            { className: 'admin-session' },
+            sessionRemaining !== null
+              ? React.createElement(
+                  'span',
+                  null,
+                  `Session: ${Math.max(0, Math.ceil(sessionRemaining / 60))} min${sessionRemaining >= 120 ? 's' : ''} remaining`
+                )
+              : null
+          ),
+
+          React.createElement(
+            'div',
+            { className: 'admin-stats' },
+            [
+              ['Calendars', calendars.length],
+              ['Events', stats.events_count],
+              [
+                'Last Import',
+                stats.last_import
+                  ? new Date(stats.last_import * 1000).toLocaleString()
+                  : 'Never'
+              ]
+            ].map(([label, value]) =>
+              React.createElement(
+                'div',
+                { key: label, className: 'admin-stat' },
+                React.createElement('span', { className: 'admin-stat-label' }, label),
+                React.createElement(
+                  'strong',
+                  {
+                    className:
+                      'admin-stat-value' +
+                      (label === 'Last Import' ? ' admin-stat-date' : '')
+                  },
+                  value
+                )
+              )
+            )
+          ),
+
+          React.createElement(ImportSummary, {
+            progress: extractorProgress,
+            running: extractorRunning,
+            calendars,
+            retry: () => importCalendar(true)
+          }),
+          // Add Calendar Form
+          React.createElement(
+            'section',
+            { className: 'admin-section' },
+            React.createElement('h2', {}, 'Add Calendar'),
+            React.createElement(
+              'form',
+              { onSubmit: addCalendar, className: 'admin-add-form' },
+              React.createElement('input', {
+                type: 'url',
+                placeholder: 'Published Calendar URL',
+                'aria-label': 'Published Calendar URL',
+                value: newCalendar.url,
+                onChange: (e) =>
+                  setNewCalendar({ ...newCalendar, url: e.target.value })
+              }),
+              React.createElement('input', {
+                type: 'text',
+                placeholder:
+                  'e.g., UTCN - Year 3 - CTI English (or utcn_room_airi_obs_204@...)',
+                'aria-label': 'Calendar name',
+                value: newCalendar.name,
+                onChange: (e) =>
+                  setNewCalendar({ ...newCalendar, name: e.target.value })
+              }),
+              React.createElement('input', {
+                type: 'color',
+                'aria-label': 'Calendar color',
+                value: newCalendar.color,
+                onChange: (e) =>
+                  setNewCalendar({ ...newCalendar, color: e.target.value })
+              }),
+              React.createElement(
+                'button',
+                { className: 'primary', type: 'submit' },
+                'Add'
+              ),
+              React.createElement(
+                'button',
+                {
+                  type: 'button',
+                  onClick: importCalendar,
+                  disabled: importing || extractorRunning
                 },
-                    React.createElement('span', null, message.text),
-                    React.createElement('button', {
-                        onClick: () => { window.location = '/admin?expired=1' },
-                        style: { marginLeft: '1rem', padding: '0.5rem 0.75rem', background: '#003366', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
-                    }, 'Go to login')
-                )
-                : React.createElement('div', {
-                    className: `admin-message ${message.type}`,
-                    style: {
-                        padding: '1rem',
-                        marginBottom: '1rem',
-                        borderRadius: '8px',
-                        background: message.type === 'success' ? '#d4edda' : '#f8d7da',
-                        color: message.type === 'success' ? '#155724' : '#721c24'
-                    }
-                }, message.text)
+                importing ? 'Importing...' : 'Import All'
+              )
+            )
+          ),
+          // CSV Controls - always visible, placed before Configured Calendars as requested
+          React.createElement(
+            'section',
+            { className: 'admin-inventory' },
+            React.createElement(
+              'a',
+              {
+                href: '/download/Rooms_PUBLISHER_HTML-ICS(in).csv',
+                download: 'Rooms_PUBLISHER_HTML-ICS.csv',
+                className: 'btn btn-secondary'
+              },
+              'Download CSV'
             ),
+            React.createElement(
+              'div',
+              { className: 'admin-upload' },
+              React.createElement('input', {
+                'aria-label': 'Calendar inventory CSV',
+                id: 'upload-csv-input-global',
+                name: 'file',
+                type: 'file',
+                accept: '.csv'
+              }),
+              React.createElement(
+                'button',
+                { id: 'upload-csv-btn-global', type: 'button', onClick: null },
+                'Upload CSV'
+              )
+            )
+          ),
 
-            // Warning banner when session is about to expire (shows before 'expired')
-            warningInfo && (!message || message.type !== 'expired') && React.createElement('div', {
-                className: 'admin-message warning',
-                style: {
-                    padding: '1rem',
-                    marginBottom: '1rem',
-                    borderRadius: '8px',
-                    background: '#fff3cd',
-                    color: '#856404',
-                    display: 'flex',
-                    justifyContent: 'space-between',
-                    alignItems: 'center'
+          // Calendars List
+          React.createElement(
+            'section',
+            { className: 'admin-section admin-calendars' },
+            React.createElement('h2', {}, 'Configured Calendars'),
+            React.createElement(
+              'div',
+              { className: 'calendar-controls' },
+              React.createElement('input', {
+                'aria-label': 'Search calendars',
+                placeholder: 'Search room, building or calendar…',
+                value: query,
+                onChange: (e) => {
+                  setQuery(e.target.value)
+                  setPage(0)
                 }
-            },
-                React.createElement('span', null, `Session will expire in ${warningInfo.secs} seconds.`),
-                React.createElement('div', null,
-                    React.createElement('button', {
-                        onClick: extendSession,
-                        style: { marginLeft: '1rem', padding: '0.4rem 0.6rem', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
-                    }, 'Extend session'),
-                    React.createElement('button', {
-                        onClick: () => { window.location = '/admin?expired=1' },
-                        style: { marginLeft: '0.6rem', padding: '0.4rem 0.6rem', background: '#003366', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
-                    }, 'Go to login')
+              }),
+              React.createElement(
+                'select',
+                {
+                  'aria-label': 'Filter import status',
+                  value: statusFilter,
+                  onChange: (e) => {
+                    setStatusFilter(e.target.value)
+                    setPage(0)
+                  }
+                },
+                ['all', 'success', 'failed', 'unknown'].map((v) =>
+                  React.createElement('option', { key: v, value: v }, v)
                 )
+              ),
+              React.createElement(
+                'span',
+                null,
+                `${matching.length} calendars · Page ${currentPage + 1}/${pageCount}`
+              ),
+              React.createElement(
+                'button',
+                {
+                  disabled: currentPage === 0,
+                  onClick: () => setPage(currentPage - 1)
+                },
+                'Previous'
+              ),
+              React.createElement(
+                'button',
+                {
+                  disabled: currentPage + 1 >= pageCount,
+                  onClick: () => setPage(currentPage + 1)
+                },
+                'Next'
+              )
             ),
-
-            // Session indicator (minutes remaining)
-            React.createElement('div', { style: { textAlign: 'right', marginBottom: '0.5rem', color: '#333', fontSize: '0.95rem' } },
-                sessionRemaining !== null
-                    ? React.createElement('span', null, `Session: ${Math.max(0, Math.ceil(sessionRemaining / 60))} min${sessionRemaining >= 120 ? 's' : ''} remaining`)
-                    : null
-            ),
-
-            // Stats
-            React.createElement('div', { className: 'admin-stats', style: {
-                display: 'grid',
-                gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                gap: '1rem',
-                marginBottom: '2rem'
-            }},
-                React.createElement('div', { style: { background: '#f8f9fa', padding: '1rem', borderRadius: '8px', textAlign: 'center' }},
-                    React.createElement('div', { style: { fontSize: '2rem', fontWeight: 'bold', color: '#003366' }}, calendars.length),
-                    React.createElement('div', { style: { color: '#666' }}, 'Calendars')
-                ),
-                React.createElement('div', { style: { background: '#f8f9fa', padding: '1rem', borderRadius: '8px', textAlign: 'center' }},
-                    React.createElement('div', { style: { fontSize: '2rem', fontWeight: 'bold', color: '#003366' }}, stats.events_count),
-                    React.createElement('div', { style: { color: '#666' }}, 'Events')
-                ),
-                React.createElement('div', { style: { background: '#f8f9fa', padding: '1rem', borderRadius: '8px', textAlign: 'center' }},
-                    React.createElement('div', { style: { fontSize: '1rem', fontWeight: 'bold', color: '#003366' }},
-                        stats.last_import ? new Date(stats.last_import * 1000).toLocaleString() : 'Never'
-                    ),
-                    React.createElement('div', { style: { color: '#666' }}, 'Last Import')
-                )
-            ),
-
-            React.createElement(ImportSummary, { progress: extractorProgress, running: extractorRunning,
-                calendars, retry: () => importCalendar(true) }),
-            // Add Calendar Form
-            React.createElement('div', { style: { background: 'white', padding: '1.5rem', borderRadius: '8px', marginBottom: '2rem', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }},
-                React.createElement('h2', { style: { marginBottom: '1rem', color: '#003366' }}, 'Add Calendar'),
-                React.createElement('form', { onSubmit: addCalendar, style: { display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }},
-                    React.createElement('input', {
-                        type: 'url',
-                        placeholder: 'Published Calendar URL',
-                        value: newCalendar.url,
-                        onChange: (e) => setNewCalendar({...newCalendar, url: e.target.value}),
-                        style: { flex: '1', minWidth: '300px', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }
-                    }),
-                    React.createElement('input', {
-                        type: 'text',
-                        placeholder: 'e.g., UTCN - Year 3 - CTI English (or utcn_room_airi_obs_204@...)',
-                        value: newCalendar.name,
-                        onChange: (e) => setNewCalendar({...newCalendar, name: e.target.value}),
-                        style: { width: '220px', padding: '0.5rem', border: '1px solid #ddd', borderRadius: '4px' }
-                    }),
-                    React.createElement('input', {
-                        type: 'color',
-                        value: newCalendar.color,
-                        onChange: (e) => setNewCalendar({...newCalendar, color: e.target.value}),
-                        style: { width: '50px', padding: '0.25rem', border: '1px solid #ddd', borderRadius: '4px' }
-                    }),
-                    React.createElement('button', {
-                        type: 'submit',
-                        style: { padding: '0.5rem 1rem', background: '#003366', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
-                    }, 'Add'),
-                    React.createElement('button', {
-                        type: 'button',
-                        onClick: importCalendar,
-                        disabled: importing || extractorRunning,
-                        style: { padding: '0.5rem 1rem', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }
-                    }, importing ? 'Importing...' : 'Import All')
-                )
-
-            ),
-            // CSV Controls - always visible, placed before Configured Calendars as requested
-            React.createElement('div', { style: { background: '#f8f9fa', padding: '1rem', borderRadius: '8px', marginBottom: '1rem', display: 'flex', alignItems: 'center', gap: '8px' } },
-                React.createElement('a', { href: '/download/Rooms_PUBLISHER_HTML-ICS(in).csv', download: 'Rooms_PUBLISHER_HTML-ICS.csv', className: 'btn btn-secondary', style: { padding: '0.4rem 0.6rem', background: '#6c757d', color: 'white', borderRadius: '4px', textDecoration: 'none' } }, 'Download CSV'),
-                React.createElement('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-                    React.createElement('input', { id: 'upload-csv-input-global', name: 'file', type: 'file', accept: '.csv', style: { padding: '0.2rem' } }),
-                    React.createElement('button', { id: 'upload-csv-btn-global', type: 'button', onClick: null, style: { padding: '0.4rem 0.6rem', background: '#007bff', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' } }, 'Upload CSV')
-                )
-            ),
-
-            // Calendars List
-            React.createElement('div', { style: { background: 'white', padding: '1.5rem', borderRadius: '8px', marginBottom: '2rem', boxShadow: '0 2px 4px rgba(0,0,0,0.1)' }},
-                React.createElement('h2', { style: { marginBottom: '1rem', color: '#003366' }}, 'Configured Calendars'),
-                React.createElement('div', { className: 'calendar-controls' },
-                    React.createElement('input', { 'aria-label': 'Search calendars', placeholder: 'Search room, building or calendar…', value: query,
-                        onChange: e => { setQuery(e.target.value); setPage(0) } }),
-                    React.createElement('select', { 'aria-label': 'Filter import status', value: statusFilter,
-                        onChange: e => { setStatusFilter(e.target.value); setPage(0) } },
-                        ['all', 'success', 'failed', 'unknown'].map(v => React.createElement('option', {key:v, value:v}, v))),
-                    React.createElement('span', null, `${matching.length} calendars · Page ${currentPage + 1}/${pageCount}`),
-                    React.createElement('button', { disabled: currentPage === 0, onClick: () => setPage(currentPage - 1) }, 'Previous'),
-                    React.createElement('button', { disabled: currentPage + 1 >= pageCount, onClick: () => setPage(currentPage + 1) }, 'Next')
-                ),
-                matching.length === 0
-                    ? React.createElement('p', { style: { color: '#666' }}, 'No calendars configured yet.')
-                    : React.createElement('div', { style: { display: 'flex', flexDirection: 'column', gap: '0.5rem' }},
-                        visibleCalendars.map((cal) =>
-                            editingCalendar && editingCalendar.id === cal.id
-                                // Edit mode
-                                ? React.createElement('form', {
-                                    key: cal.id,
-                                    onSubmit: updateCalendar,
-                                    style: {
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '0.5rem',
-                                        padding: '0.75rem',
-                                        background: '#e3f2fd',
-                                        borderRadius: '4px',
-                                        borderLeft: `4px solid ${editingCalendar.color || '#003366'}`,
-                                        flexWrap: 'wrap'
-                                    }
-                                },
-                                    React.createElement('input', {
-                                        type: 'text',
-                                        placeholder: 'e.g., UTCN - Year 3 - CTI English',
-                                        value: editingCalendar.name || '',
-                                        onChange: (e) => setEditingCalendar({...editingCalendar, name: e.target.value}),
-                                        style: { flex: '1', minWidth: '150px', padding: '0.4rem', border: '1px solid #90caf9', borderRadius: '4px' }
-                                    }),
-                                    React.createElement('input', {
-                                        type: 'color',
-                                        value: editingCalendar.color || '#003366',
-                                        onChange: (e) => setEditingCalendar({...editingCalendar, color: e.target.value}),
-                                        style: { width: '40px', height: '32px', padding: '2px', border: '1px solid #90caf9', borderRadius: '4px', cursor: 'pointer' }
-                                    }),
-                                    React.createElement('label', { style: { display: 'flex', alignItems: 'center', gap: '0.25rem', fontSize: '0.85rem' }},
-                                        React.createElement('input', {
-                                            type: 'checkbox',
-                                            checked: editingCalendar.enabled !== 0,
-                                            onChange: (e) => setEditingCalendar({...editingCalendar, enabled: e.target.checked ? 1 : 0})
-                                        }),
-                                        'Enabled'
-                                    ),
-                                    React.createElement('button', {
-                                        type: 'submit',
-                                        style: { padding: '0.4rem 0.75rem', background: '#28a745', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' }
-                                    }, 'Save'),
-                                    React.createElement('button', {
-                                        type: 'button',
-                                        onClick: () => setEditingCalendar(null),
-                                        style: { padding: '0.4rem 0.75rem', background: '#6c757d', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.85rem' }
-                                    }, 'Cancel')
-                                )
-                                // View mode
-                                : React.createElement('div', {
-                                    key: cal.id,
-                                    className: 'calendar-entry',
-                                    style: {
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '1rem',
-                                        padding: '0.75rem',
-                                        background: cal.enabled === 0 ? '#f0f0f0' : '#f8f9fa',
-                                        borderRadius: '4px',
-                                        borderLeft: `4px solid ${cal.color || '#003366'}`,
-                                        opacity: cal.enabled === 0 ? 0.6 : 1
-                                    }
-                                },
-                                    React.createElement('div', { className: 'calendar-entry-info' },
-                                        React.createElement('strong', null, cal.name || 'Unnamed'),
-                                        React.createElement(CalendarImportStatus, { value: cal.import_status }),
-                                        React.createElement('div', {className: 'calendar-links'},
-                                            cal.html_url_link && React.createElement('a', {href:cal.html_url_link, target:'_blank', rel:'noopener noreferrer'}, 'Open HTML'),
-                                            cal.url_link && React.createElement('a', {href:cal.url_link, target:'_blank', rel:'noopener noreferrer'}, 'Open ICS')
-                                        )
-                                    ),
-                                    cal.enabled === 0 && React.createElement('span', { style: { fontSize: '0.75rem', color: '#999', fontStyle: 'italic' }}, 'disabled'),
-                                    React.createElement('button', {
-                                        onClick: () => setEditingCalendar({...cal}),
-                                        style: { padding: '0.25rem 0.5rem', background: '#0066cc', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }
-                                    }, 'Edit'),
-                                    React.createElement('button', {
-                                        onClick: () => deleteCalendar(cal.id),
-                                        style: { padding: '0.25rem 0.5rem', background: '#dc3545', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer', fontSize: '0.8rem' }
-                                    }, 'Delete')
-                                )
+            matching.length === 0
+              ? React.createElement('p', {}, 'No calendars configured yet.')
+              : React.createElement(
+                  'div',
+                  { className: 'calendar-list' },
+                  visibleCalendars.map((cal) =>
+                    editingCalendar && editingCalendar.id === cal.id
+                      ? // Edit mode
+                        React.createElement(
+                          'form',
+                          {
+                            key: cal.id,
+                            onSubmit: updateCalendar,
+                            className: 'calendar-entry calendar-edit',
+                            style: {
+                              '--calendar-color': cal.color || 'var(--accent)'
+                            }
+                          },
+                          React.createElement('input', {
+                            type: 'text',
+                            placeholder: 'e.g., UTCN - Year 3 - CTI English',
+                            'aria-label': 'Edit calendar name',
+                            value: editingCalendar.name || '',
+                            onChange: (e) =>
+                              setEditingCalendar({
+                                ...editingCalendar,
+                                name: e.target.value
+                              })
+                          }),
+                          React.createElement('input', {
+                            type: 'color',
+                            'aria-label': 'Edit calendar color',
+                            value: editingCalendar.color || '#003366',
+                            onChange: (e) =>
+                              setEditingCalendar({
+                                ...editingCalendar,
+                                color: e.target.value
+                              })
+                          }),
+                          React.createElement(
+                            'label',
+                            {},
+                            React.createElement('input', {
+                              type: 'checkbox',
+                              checked: editingCalendar.enabled !== 0,
+                              onChange: (e) =>
+                                setEditingCalendar({
+                                  ...editingCalendar,
+                                  enabled: e.target.checked ? 1 : 0
+                                })
+                            }),
+                            'Enabled'
+                          ),
+                          React.createElement(
+                            'button',
+                            { className: 'primary', type: 'submit' },
+                            'Save'
+                          ),
+                          React.createElement(
+                            'button',
+                            {
+                              type: 'button',
+                              onClick: () => setEditingCalendar(null)
+                            },
+                            'Cancel'
+                          )
                         )
-                    )
-            ),
+                      : // View mode
+                        React.createElement(
+                          'div',
+                          {
+                            key: cal.id,
+                            className:
+                              'calendar-entry' +
+                              (cal.enabled === 0 ? ' calendar-disabled-entry' : ''),
+                            style: {
+                              '--calendar-color': cal.color || 'var(--accent)'
+                            }
+                          },
+                          React.createElement(
+                            'div',
+                            { className: 'calendar-entry-info' },
+                            React.createElement(
+                              'strong',
+                              null,
+                              cal.name || 'Unnamed'
+                            ),
+                            React.createElement(CalendarImportStatus, {
+                              value: cal.import_status
+                            }),
+                            React.createElement(
+                              'div',
+                              { className: 'calendar-links' },
+                              cal.html_url_link &&
+                                React.createElement(
+                                  'a',
+                                  {
+                                    href: cal.html_url_link,
+                                    target: '_blank',
+                                    rel: 'noopener noreferrer'
+                                  },
+                                  'Open HTML'
+                                ),
+                              cal.url_link &&
+                                React.createElement(
+                                  'a',
+                                  {
+                                    href: cal.url_link,
+                                    target: '_blank',
+                                    rel: 'noopener noreferrer'
+                                  },
+                                  'Open ICS'
+                                )
+                            )
+                          ),
+                          cal.enabled === 0 &&
+                            React.createElement(
+                              'span',
+                              { className: 'calendar-disabled' },
+                              'disabled'
+                            ),
+                          React.createElement(
+                            'button',
+                            {
+                              onClick: () => setEditingCalendar({ ...cal })
+                            },
+                            'Edit'
+                          ),
+                          React.createElement(
+                            'button',
+                            {
+                              className: 'danger',
+                              onClick: () => deleteCalendar(cal.id)
+                            },
+                            'Delete'
+                          )
+                        )
+                  )
+                )
+          )
 
-            // Manual events UI removed from React admin per request
+          // Manual events UI removed from React admin per request
         )
     }
 
