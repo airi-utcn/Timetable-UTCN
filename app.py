@@ -2180,7 +2180,7 @@ def _build_normalized_schedule_events(schedule, _cmap_for_events):
 
 
 @app.route('/events.json')
-def events_json():
+def events_json(*, schedule_snapshot=None, for_availability=False):
     """Return flattened events for FullCalendar or API clients.
 
     Query params: from, to, subject, professor
@@ -2216,20 +2216,22 @@ def events_json():
     if to_date < from_date:
         return jsonify({'error': 'to must be on or after from'}), 400
 
-    # ensure schedule exists
-    try:
-        jpath, cpath = ensure_schedule(from_date, to_date)
-    except Exception as exc:
-        # No schedule available yet - return empty array (not 500 error)
-        app.logger.warning('ensure_schedule failed: %s', exc)
-        return jsonify([])
+    # Availability reuses the snapshot already validated under its import lock.
+    schedule = schedule_snapshot
+    if schedule is None:
+        try:
+            jpath, cpath = ensure_schedule(from_date, to_date)
+        except Exception as exc:
+            # No schedule available yet - return empty array (not 500 error)
+            app.logger.warning('ensure_schedule failed: %s', exc)
+            return jsonify([])
 
-    if not jpath or not os.path.exists(jpath):
-        app.logger.warning('schedule file missing after ensure_schedule: %s', jpath)
-        return jsonify([])
+        if not jpath or not os.path.exists(jpath):
+            app.logger.warning('schedule file missing after ensure_schedule: %s', jpath)
+            return jsonify([])
 
-    # Use cached schedule data to avoid re-reading the JSON file on every request
-    schedule = _read_json_cached(str(jpath))
+        # Use cached schedule data to avoid re-reading JSON on every request.
+        schedule = _read_json_cached(str(jpath))
     if not isinstance(schedule, dict):
         return jsonify([])
 
@@ -2241,7 +2243,7 @@ def events_json():
     has_date_filter = bool(from_s or to_s)
     events = []
     for day, day_events in _normalized_schedule_events(schedule, _cmap_for_events).items():
-        if has_date_filter and not (from_date.isoformat() <= day <= to_date.isoformat()):
+        if not for_availability and has_date_filter and not (from_date.isoformat() <= day <= to_date.isoformat()):
             continue
         events.extend(day_events)
 
@@ -2260,7 +2262,7 @@ def events_json():
                     d = dtparser.parse(start_dt).date()
                 except Exception:
                     continue
-                if has_date_filter and (d < from_date or d > to_date):
+                if not for_availability and has_date_filter and (d < from_date or d > to_date):
                     continue
                 ev_obj = {
                     'title': me.get('title'),
@@ -2278,7 +2280,8 @@ def events_json():
             except Exception:
                 continue
     except Exception:
-        pass
+        if for_availability:
+            raise
 
     # Append extracurricular events from DB so they appear in the calendar with a distinct color
     try:
@@ -2293,7 +2296,7 @@ def events_json():
                 ev_date = dtparser.parse(d).date()
             except Exception:
                 continue
-            if has_date_filter and (ev_date < from_date or ev_date > to_date):
+            if not for_availability and has_date_filter and (ev_date < from_date or ev_date > to_date):
                 continue
             time_s = (xe.get('time') or '').strip()
             if time_s:
@@ -2322,13 +2325,27 @@ def events_json():
             }
             events.append(ev_obj)
     except Exception:
-        pass
+        if for_availability:
+            raise
 
     disabled_sources = _disabled_sources()
 
     def matches(ev):
         if ev.get('source') in disabled_sources:
             return False
+        if for_availability:
+            # Keep overnight/multi-day bookings and allow for timezone offsets.
+            # The browser applies the exact interval; malformed times stay visible
+            # so they cannot incorrectly establish a free room.
+            try:
+                start_dt = dtparser.parse(ev['start'])
+                end_dt = dtparser.parse(ev['end'])
+                if end_dt > start_dt:
+                    return (start_dt.date() <= to_date + timedelta(days=1)
+                            and end_dt.date() >= from_date - timedelta(days=1))
+            except (ValueError, TypeError, KeyError, OverflowError):
+                pass
+            return True
         subject = ' '.join(str(ev.get(k) or '') for k in ('title', 'subject', 'display_title')).lower()
         return (not subject_filter or subject_filter in subject) and (
             not professor_filter or professor_filter in str(ev.get('professor') or '').lower()) and (
@@ -2357,11 +2374,13 @@ def _availability_data():
         return jsonify({'error': 'Choose a valid interval of at most seven days.'}), 400
     try:
         path, _ = ensure_schedule(start, end)
-        if not path or not isinstance(_read_json_cached(str(path)), dict):
+        schedule = _read_json_cached(str(path)) if path else None
+        if not isinstance(schedule, dict):
             raise ValueError('No complete schedule available')
+        events = events_json(schedule_snapshot=schedule, for_availability=True).get_json()
     except Exception:
         return jsonify({'error': 'Schedule unavailable; room availability is unknown.'}), 503
-    return jsonify({'events': events_json().get_json(), 'calendars': calendars_json().get_json()})
+    return jsonify({'events': events, 'calendars': calendars_json().get_json()})
 
 
 @app.route('/export_room')
