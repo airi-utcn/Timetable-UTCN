@@ -140,7 +140,12 @@ export function roomAvailability(
           e = new Date(ev.end)
         // Incomplete event times cannot safely establish a free room.
         return (
-          !Number.isFinite(+s) || !Number.isFinite(+e) || (s < to && e > from)
+          !ev.start ||
+          !ev.end ||
+          !Number.isFinite(+s) ||
+          !Number.isFinite(+e) ||
+          e <= s ||
+          (s < to && e > from)
         )
       })
       return {
